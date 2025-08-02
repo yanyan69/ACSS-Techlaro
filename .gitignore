@@ -14,3 +14,13 @@ __pycache__/
 *.pyc
 .vscode/
 .env/
+
+*.ipynb
+*.bak
+# AI model files
+*.keras
+*.h5
+*.tflite
+
+# Logs
+*.log

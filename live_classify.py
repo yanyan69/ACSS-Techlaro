@@ -47,7 +47,7 @@ try:
             break
 
         # Prepare image for classification
-        img = Image.fromarray(frame).resize((180, 180))
+        img = Image.fromarray(frame).convert("RGB").resize((180, 180))
         img_array = np.array(img, dtype=np.float32)
         img_array = np.expand_dims(img_array, axis=0)
 

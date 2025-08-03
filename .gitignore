@@ -1,0 +1,16 @@
+﻿# Ignore all datasets and images
+copra_classifier/dataset/
+copra_classifier/dataset-temp/
+copra_classifier/sample/
+
+# Ignore large image types anywhere
+*.png
+*.jpg
+*.jpeg
+*.heic
+
+# VSCode and Python stuff
+__pycache__/
+*.pyc
+.vscode/
+.env/

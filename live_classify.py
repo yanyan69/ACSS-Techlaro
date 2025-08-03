@@ -1,98 +1,71 @@
-import os, warnings, logging
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-warnings.filterwarnings('ignore', category=UserWarning, module='google.protobuf')
-
-import tflite_runtime.interpreter as tflite
+import os
+import time
 import numpy as np
 from PIL import Image
-from time import sleep, time
-from gpiozero import LED
 from picamera2 import Picamera2
-import cv2
+from tflite_runtime.interpreter import Interpreter
 
-# === LED SETUP ===
-LED_PINS = {
-    'overcooked': LED(17),  # Red
-    'raw': LED(27),         # Yellow
-    'standard': LED(22)     # Green
-}
-
-# === LOAD MODEL ===
-class_names = ['overcooked', 'raw', 'standard']
+# === Load TFLite Model ===
 model_path = 'copra_classifier/models/copra_model.tflite'
-interpreter = tflite.Interpreter(model_path=model_path)
+interpreter = Interpreter(model_path=model_path)
 interpreter.allocate_tensors()
+print(f"\nModel loaded from: {model_path}")
+
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
-print(f'\nModel loaded from: {model_path}')
+input_shape = input_details[0]['shape']
 
-# === SETUP CAMERA ===
+class_names = ['overcooked', 'raw', 'standard']
+
+# === Setup Camera ===
 picam = Picamera2()
-picam.configure(picam.create_video_configuration(main={"size": (640, 480)}))
+picam.configure(picam.create_still_configuration(main={"size": (640, 480)}))
 picam.start()
-sleep(2)
-print("Live classification started. Press Ctrl+C to stop.\n")
+time.sleep(2)  # Allow warm-up
 
-# === TRACKING ===
-start_time = time()
-window_preds = []
-window_confidences = []
+print("\nLive classification started. Press Ctrl+C to stop.\n")
 
 try:
-    while True:
-        # Capture frame and show preview using OpenCV
-        frame = picam.capture_array()
-        cv2.imshow("Live Preview", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+    confidence_buffer = []
+    class_buffer = []
+    start_time = time.time()
 
-        # Prepare image for classification
+    while True:
+        # Capture frame
+        frame = picam.capture_array()
         img = Image.fromarray(frame).convert("RGB").resize((180, 180))
-        img_array = np.array(img, dtype=np.float32)
+
+        # Preprocess (normalize like in training)
+        img_array = np.array(img, dtype=np.float32) / 255.0
         img_array = np.expand_dims(img_array, axis=0)
 
-        # Predict
+        # Run inference
         interpreter.set_tensor(input_details[0]['index'], img_array)
         interpreter.invoke()
-        prediction = interpreter.get_tensor(output_details[0]['index'])[0]
+        output = interpreter.get_tensor(output_details[0]['index'])[0]
 
-        predicted_index = np.argmax(prediction)
-        predicted_class = class_names[predicted_index]
-        confidence = prediction[predicted_index] * 100
+        predicted_class = class_names[np.argmax(output)]
+        confidence = 100 * np.max(output)
 
-        window_preds.append(predicted_class)
-        window_confidences.append(confidence)
+        confidence_buffer.append(confidence)
+        class_buffer.append(predicted_class)
 
-        # === Every 10 seconds, summarize result ===
-        if time() - start_time >= 10:
-            # Get most common prediction and average confidence
-            from collections import Counter
-            most_common_class = Counter(window_preds).most_common(1)[0][0]
-            avg_conf = np.mean([c for i, c in enumerate(window_confidences) if window_preds[i] == most_common_class])
+        # Every 10 seconds, show summary
+        if time.time() - start_time > 10:
+            avg_confidence = np.mean(confidence_buffer)
+            final_class = max(set(class_buffer), key=class_buffer.count)
 
-            print(f"""
-[10s Summary]
-  Class: {most_common_class}
-  Avg Confidence: {avg_conf:.2f}%
-""")
+            print(f"\n[10s Summary]")
+            print(f"  Class: {final_class}")
+            print(f"  Avg Confidence: {avg_confidence:.2f}%\n")
 
-            # Light up corresponding LED
-            for cls, led in LED_PINS.items():
-                led.on() if cls == most_common_class else led.off()
-
-            # Reset tracking
-            window_preds.clear()
-            window_confidences.clear()
-            start_time = time()
-
-        sleep(1)
+            # Reset buffer
+            confidence_buffer = []
+            class_buffer = []
+            start_time = time.time()
 
 except KeyboardInterrupt:
     print("\nStopped by user.")
-
 finally:
     picam.stop()
     picam.close()
-    cv2.destroyAllWindows()
-    for led in LED_PINS.values():
-        led.off()

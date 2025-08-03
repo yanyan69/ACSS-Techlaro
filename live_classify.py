@@ -1,19 +1,32 @@
 import time
+import cv2
 import numpy as np
 from PIL import Image
 from tflite_runtime.interpreter import Interpreter
 from picamera2 import Picamera2
 from gpiozero import LED
 
-# === Setup IR LEDs ===
-ir_led_pins = [17, 27, 22]  # BCM GPIO numbers
-ir_leds = [LED(pin) for pin in ir_led_pins]
+# === Setup 3 LED indicators ===
+overcooked_led = LED(17)
+raw_led = LED(27)
+standard_led = LED(22)
 
-# === Load TFLite Model ===
+def turn_on_led(predicted_class):
+    overcooked_led.off()
+    raw_led.off()
+    standard_led.off()
+
+    if predicted_class == "overcooked":
+        overcooked_led.on()
+    elif predicted_class == "raw":
+        raw_led.on()
+    elif predicted_class == "standard":
+        standard_led.on()
+
+# === Load the TFLite model ===
 model_path = 'copra_classifier/models/copra_model.tflite'
 interpreter = Interpreter(model_path=model_path)
 interpreter.allocate_tensors()
-
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 input_shape = input_details[0]['shape']
@@ -21,68 +34,73 @@ input_shape = input_details[0]['shape']
 class_names = ['overcooked', 'raw', 'standard']
 print(f"Model loaded from: {model_path}")
 
-# === Setup Camera ===
+# === Setup camera ===
 picam = Picamera2()
-picam.configure(picam.create_still_configuration(main={"size": (640, 480)}))
+picam.configure(picam.create_preview_configuration(main={"size": (640, 480)}))
 picam.start()
 time.sleep(2)
 
-# === Start Classification Loop ===
 print("Live classification started. Press Ctrl+C to stop.")
-frame_interval = 10  # seconds per summary
-frame_rate = 1  # 1 frame per second
-frame_count = 0
-accum_confidences = []
-accum_labels = []
 
-# === Turn on IR LEDs ===
-for led in ir_leds:
-    led.on()
+# === Classification loop ===
+frame_rate = 1
+frame_count = 0
+class_interval = 10  # seconds
+accum_conf = []
+accum_class = []
 
 try:
     while True:
-        frame_count += 1
+        frame = picam.capture_array()
+        preview = frame.copy()
 
-        # Capture and preprocess image
-        img = picam.capture_array()
-        img = Image.fromarray(img).convert("RGB").resize((180, 180))
+        # Resize and preprocess for model
+        img = Image.fromarray(frame).convert("RGB").resize((180, 180))
         img_array = np.array(img, dtype=np.float32) / 255.0
         img_array = np.expand_dims(img_array, axis=0)
 
-        # Predict
+        # Inference
         interpreter.set_tensor(input_details[0]['index'], img_array)
         interpreter.invoke()
         output = interpreter.get_tensor(output_details[0]['index'])[0]
 
-        predicted_index = int(np.argmax(output))
-        predicted_class = class_names[predicted_index]
-        confidence = float(np.max(output)) * 100
+        pred_index = int(np.argmax(output))
+        pred_class = class_names[pred_index]
+        conf = float(np.max(output)) * 100
 
-        accum_confidences.append(confidence)
-        accum_labels.append(predicted_class)
+        accum_conf.append(conf)
+        accum_class.append(pred_class)
 
-        time.sleep(1 / frame_rate)
+        # Show live camera window
+        cv2.imshow("Live Classification", preview)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-        # Show summary every 10 seconds
-        if frame_count >= frame_interval:
-            # Get most frequent prediction
-            most_common = max(set(accum_labels), key=accum_labels.count)
-            avg_conf = sum(accum_confidences) / len(accum_confidences)
+        frame_count += 1
+        if frame_count >= class_interval:
+            final_class = max(set(accum_class), key=accum_class.count)
+            avg_conf = sum(accum_conf) / len(accum_conf)
 
             print(f"\n[10s Summary]")
-            print(f"  Class: {most_common}")
-            print(f"  Avg Confidence: {avg_conf:.2f}%\n")
+            print(f"  Class: {final_class}")
+            print(f"  Avg Confidence: {avg_conf:.2f}%")
 
-            # Reset accumulators
+            turn_on_led(final_class)
+
+            # Reset counter
             frame_count = 0
-            accum_confidences.clear()
-            accum_labels.clear()
+            accum_class.clear()
+            accum_conf.clear()
+
+        time.sleep(1 / frame_rate)
 
 except KeyboardInterrupt:
     print("Stopped by user.")
 
 finally:
-    for led in ir_leds:
-        led.off()
+    overcooked_led.off()
+    raw_led.off()
+    standard_led.off()
     picam.stop()
     picam.close()
+    cv2.destroyAllWindows()

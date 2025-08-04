@@ -1,106 +1,101 @@
-import time
 import cv2
+import time
 import numpy as np
 from PIL import Image
+from gpiozero import LED
 from tflite_runtime.interpreter import Interpreter
 from picamera2 import Picamera2
-from gpiozero import LED
 
-# === Setup 3 LED indicators ===
-overcooked_led = LED(17)
-raw_led = LED(27)
-standard_led = LED(22)
+# === LED Setup ===
+led_raw = LED(27)
+led_standard = LED(22)
+led_overcooked = LED(17)
 
-def turn_on_led(predicted_class):
-    overcooked_led.off()
-    raw_led.off()
-    standard_led.off()
+def activate_led(label):
+    led_raw.off()
+    led_standard.off()
+    led_overcooked.off()
+    if label == 'raw':
+        led_raw.on()
+    elif label == 'standard':
+        led_standard.on()
+    elif label == 'overcooked':
+        led_overcooked.on()
 
-    if predicted_class == "overcooked":
-        overcooked_led.on()
-    elif predicted_class == "raw":
-        raw_led.on()
-    elif predicted_class == "standard":
-        standard_led.on()
-
-# === Load the TFLite model ===
-model_path = 'copra_classifier/models/copra_model.tflite'
-interpreter = Interpreter(model_path=model_path)
+# === Load TFLite Model ===
+interpreter = Interpreter(model_path='copra_classifier/models/copra_model.tflite')
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
-input_shape = input_details[0]['shape']
 
 class_names = ['overcooked', 'raw', 'standard']
-print(f"Model loaded from: {model_path}")
+input_size = (180, 180)
 
-# === Setup camera ===
+# === PiCamera2 Setup ===
 picam = Picamera2()
 picam.configure(picam.create_preview_configuration(main={"size": (640, 480)}))
 picam.start()
 time.sleep(2)
 
-print("Live classification started. Press Ctrl+C to stop.")
-
-# === Classification loop ===
-frame_rate = 1
-frame_count = 0
-class_interval = 10  # seconds
-accum_conf = []
-accum_class = []
+print("🔍 Live Object Classifier Running...")
 
 try:
     while True:
         frame = picam.capture_array()
         preview = frame.copy()
 
-        # Resize and preprocess for model
-        img = Image.fromarray(frame).convert("RGB").resize((180, 180))
-        img_array = np.array(img, dtype=np.float32) / 255.0
-        img_array = np.expand_dims(img_array, axis=0)
+        # === Detect copra (basic brown color segmentation) ===
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        lower_brown = np.array([10, 60, 20])
+        upper_brown = np.array([30, 255, 200])
+        mask = cv2.inRange(hsv, lower_brown, upper_brown)
 
-        # Inference
-        interpreter.set_tensor(input_details[0]['index'], img_array)
-        interpreter.invoke()
-        output = interpreter.get_tensor(output_details[0]['index'])[0]
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        pred_index = int(np.argmax(output))
-        pred_class = class_names[pred_index]
-        conf = float(np.max(output)) * 100
+        if contours:
+            contour = max(contours, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(contour)
 
-        accum_conf.append(conf)
-        accum_class.append(pred_class)
+            if w * h > 1000:  # ignore tiny detections
+                cv2.rectangle(preview, (x, y), (x+w, y+h), (0, 255, 0), 2)
 
-        # Show live camera window
-        cv2.imshow("Live Classification", preview)
+                # === Crop ROI and classify ===
+                roi = frame[y:y+h, x:x+w]
+                img = Image.fromarray(roi).convert('RGB').resize(input_size)
+                input_tensor = np.expand_dims(np.array(img, dtype=np.float32) / 255.0, axis=0)
+
+                interpreter.set_tensor(input_details[0]['index'], input_tensor)
+                interpreter.invoke()
+                output = interpreter.get_tensor(output_details[0]['index'])[0]
+
+                pred_index = int(np.argmax(output))
+                label = class_names[pred_index]
+                confidence = float(np.max(output)) * 100
+
+                # === LED Feedback ===
+                activate_led(label)
+
+                # === Overlay info ===
+                cv2.putText(preview, f'{label} ({confidence:.1f}%)', (x, y-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        else:
+            print("No object detected.")
+            activate_led(None)
+
+        # === Show the frame ===
+        cv2.imshow("Copra Object Classifier", preview)
+
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-        frame_count += 1
-        if frame_count >= class_interval:
-            final_class = max(set(accum_class), key=accum_class.count)
-            avg_conf = sum(accum_conf) / len(accum_conf)
-
-            print(f"\n[10s Summary]")
-            print(f"  Class: {final_class}")
-            print(f"  Avg Confidence: {avg_conf:.2f}%")
-
-            turn_on_led(final_class)
-
-            # Reset counter
-            frame_count = 0
-            accum_class.clear()
-            accum_conf.clear()
-
-        time.sleep(1 / frame_rate)
-
 except KeyboardInterrupt:
-    print("Stopped by user.")
+    print("🛑 Stopped by user.")
 
 finally:
-    overcooked_led.off()
-    raw_led.off()
-    standard_led.off()
+    led_raw.off()
+    led_standard.off()
+    led_overcooked.off()
     picam.stop()
     picam.close()
     cv2.destroyAllWindows()

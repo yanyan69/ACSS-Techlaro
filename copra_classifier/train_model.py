@@ -1,3 +1,9 @@
+import os, warnings, logging
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'       #ignores everything except errors
+logging.getLogger('tensorflow').setLevel
+warnings.filterwarnings('ignore', category=UserWarning, module = 'google.protobuf')
+
 from build_model import model
 from load_dataset import load_dataset
 

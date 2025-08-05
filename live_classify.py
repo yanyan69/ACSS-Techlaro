@@ -44,11 +44,14 @@ try:
         frame = picam.capture_array()
         preview = frame.copy()
 
-        # === Detect copra (basic brown color segmentation) ===
+                # === Detect copra (basic brown color segmentation) ===
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         lower_brown = np.array([10, 60, 20])
         upper_brown = np.array([30, 255, 200])
         mask = cv2.inRange(hsv, lower_brown, upper_brown)
+
+        # Show mask window (debug)
+        cv2.imshow("HSV Mask", mask)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -56,10 +59,16 @@ try:
             contour = max(contours, key=cv2.contourArea)
             x, y, w, h = cv2.boundingRect(contour)
 
-            if w * h > 1000:  # ignore tiny detections
+            if w * h > 1000:
+                # Draw detection box
                 cv2.rectangle(preview, (x, y), (x+w, y+h), (0, 255, 0), 2)
 
-                # === Crop ROI and classify ===
+                # Print HSV value at center of detected region
+                center_x, center_y = x + w // 2, y + h // 2
+                hsv_pixel = hsv[center_y, center_x]
+                print(f"🎯 Detected area HSV @ ({center_x},{center_y}): {hsv_pixel}")
+
+                # Crop ROI and classify
                 roi = frame[y:y+h, x:x+w]
                 img = Image.fromarray(roi).convert('RGB').resize(input_size)
                 input_tensor = np.expand_dims(np.array(img, dtype=np.float32) / 255.0, axis=0)
@@ -72,16 +81,17 @@ try:
                 label = class_names[pred_index]
                 confidence = float(np.max(output)) * 100
 
-                # === LED Feedback ===
+                # LED + Label
                 activate_led(label)
-
-                # === Overlay info ===
                 cv2.putText(preview, f'{label} ({confidence:.1f}%)', (x, y-10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
+                print(f"🧠 Class: {label} | Confidence: {confidence:.2f}%\n")
+
         else:
-            print("No object detected.")
+            print("⚠️  No object detected in current frame.")
             activate_led(None)
+
 
         # === Show the frame ===
         cv2.imshow("Copra Object Classifier", preview)

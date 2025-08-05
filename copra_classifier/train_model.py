@@ -20,5 +20,5 @@ loss, acc = model.evaluate(val_ds)
 print(f"\n✅ Final Validation Accuracy: {acc:.2%}")
 
 # Save model
-model.save('copra_classifier/models/copra_model.keras')
-print("✅ Model saved to: copra_classifier/models/copra_model.keras")
+model.save('models/copra_model.h5')
+print("✅ Model saved to: copra_classifier/models/copra_model.h5")

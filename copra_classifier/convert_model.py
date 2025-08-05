@@ -7,7 +7,10 @@ warnings.filterwarnings('ignore', category=UserWarning, module = 'google.protobu
 import tensorflow as tf
 
 # Load your normalized Keras model
-model = tf.keras.models.load_model('copra_classifier/models/copra_model.keras')
+model = tf.keras.models.load_model(
+    'models/copra_model.h5',
+    compile=False  # Skip optimizer loading for conversion
+)
 
 # Convert to TFLite (using only built-in ops, compatible with Pi)
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
@@ -22,7 +25,7 @@ converter.inference_output_type = tf.float32
 tflite_model = converter.convert()
 
 # Save the converted model
-with open('copra_classifier/models/copra_model.tflite', 'wb') as f:
+with open('models/copra_model.tflite', 'wb') as f:
     f.write(tflite_model)
 
 print("✅ Model successfully converted to TFLite using TFLITE_BUILTINS.")

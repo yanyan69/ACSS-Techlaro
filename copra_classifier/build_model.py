@@ -48,7 +48,7 @@ model.compile(
 )
 
 # Save class names to file
-with open('copra_classifier/models/class_names.txt', 'w') as f:
+with open('models/class_names.txt', 'w') as f:
     for name in class_names:
         f.write(name + '\n')
 

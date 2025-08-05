@@ -92,6 +92,8 @@ try:
 
         fps = 1 / (time.time() - start)
         print(f"⚡ FPS: {fps:.2f}    Prediction: {label_text}", end='\r')
+        print("📐 Expected input shape:", input_details[0]['shape'])  # Should be [1, 180, 180, 3]
+
 
 except KeyboardInterrupt:
     print("\n🛑 Stopped by user.")

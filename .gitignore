@@ -2,9 +2,10 @@
 copra_classifier/dataset/
 copra_classifier/dataset-temp/
 copra_classifier/sample/
-\tf210-env
-\acss-env
-\source
+tf210-env/
+acss-env/
+source/
+(experimental)model_training/
 # Ignore large image types anywhere
 *.png
 *.jpg

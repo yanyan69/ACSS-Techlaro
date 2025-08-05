@@ -28,7 +28,8 @@ val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
 print('\n🛠️ Building CNN model...')
 
 model = keras.Sequential([
-    layers.Input(shape=(180, 180, 3)),  # <-- ensures batch dimension is preserved in TFLite
+    layers.Input(shape=(180, 180, 3)),  # explicitly defines input layer
+    layers.Rescaling(1./255),
     layers.Conv2D(16, 3, activation='relu'),
     layers.MaxPooling2D(),
     layers.Conv2D(32, 3, activation='relu'),

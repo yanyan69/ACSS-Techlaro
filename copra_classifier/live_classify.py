@@ -4,6 +4,7 @@ import numpy as np
 from tflite_runtime.interpreter import Interpreter
 from picamera2 import Picamera2
 from gpiozero import LED
+from PIL import Image
 
 # === LED Setup ===
 led_overcooked = LED(17)
@@ -29,7 +30,7 @@ interpreter = Interpreter(model_path=model_path)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
-input_size = input_details[0]['shape'][1:3]  # (180,180)
+input_size = input_details[0]['shape'][1:3]  # (180, 180)
 
 print(f"✅ Model loaded from: {model_path}")
 print(f"✅ Class labels: {class_names}")
@@ -45,7 +46,7 @@ print("📡 Live Classification Running (press Ctrl+C to stop)...")
 
 # === Parameters ===
 box_size = 180
-conf_threshold = 65.0  # Only show if confidence is high enough
+conf_threshold = 65.0
 
 try:
     while True:
@@ -58,12 +59,13 @@ try:
         cx, cy = w // 2, h // 2
         half = box_size // 2
 
-        # === Crop center area for model
+        # === Crop center and convert to RGB
         crop = frame[cy-half:cy+half, cx-half:cx+half]
-        resized = cv2.resize(crop, input_size)
-        input_tensor = np.expand_dims(resized.astype(np.float32) / 255.0, axis=0)
+        img = Image.fromarray(crop).convert("RGB")  # ensure 3 channels
+        img = img.resize(input_size)
+        input_tensor = np.expand_dims(np.array(img, dtype=np.float32) / 255.0, axis=0)
 
-        # === Inference
+        # === Run inference
         interpreter.set_tensor(input_details[0]['index'], input_tensor)
         interpreter.invoke()
         output = interpreter.get_tensor(output_details[0]['index'])[0]
@@ -76,13 +78,12 @@ try:
             activate_led(pred_class)
             label_text = f"{pred_class} ({confidence:.1f}%)"
         else:
-            # Not confident → turn off LEDs, show unknown
             label_text = "..."
             led_overcooked.off()
             led_raw.off()
             led_standard.off()
 
-        # === Display label and box
+        # === Draw detection box and label
         cv2.rectangle(preview, (cx-half, cy-half), (cx+half, cy+half), (0, 255, 0), 2)
         cv2.putText(preview, label_text, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
@@ -92,7 +93,7 @@ try:
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-        # Print FPS
+        # Show FPS
         fps = 1 / (time.time() - start)
         print(f"⚡ FPS: {fps:.2f}    Prediction: {label_text}", end='\r')
 

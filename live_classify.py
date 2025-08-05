@@ -44,13 +44,13 @@ try:
         frame = picam.capture_array()
         preview = frame.copy()
 
-                # === Detect copra (basic brown color segmentation) ===
+        # === Detect copra (basic brown color segmentation) ===
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         lower_brown = np.array([10, 60, 20])
         upper_brown = np.array([30, 255, 200])
         mask = cv2.inRange(hsv, lower_brown, upper_brown)
 
-        # Show mask window (debug)
+        # Debug view
         cv2.imshow("HSV Mask", mask)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -58,18 +58,18 @@ try:
         if contours:
             contour = max(contours, key=cv2.contourArea)
             x, y, w, h = cv2.boundingRect(contour)
+            area = w * h
+            print(f"[Detection] Bounding box: (x={x}, y={y}, w={w}, h={h}) - Area: {area}")
 
-            if w * h > 1000:
-                # Draw detection box
+            if area > 1000:
+                roi = frame[y:y+h, x:x+w]
                 cv2.rectangle(preview, (x, y), (x+w, y+h), (0, 255, 0), 2)
 
-                # Print HSV value at center of detected region
-                center_x, center_y = x + w // 2, y + h // 2
-                hsv_pixel = hsv[center_y, center_x]
-                print(f"🎯 Detected area HSV @ ({center_x},{center_y}): {hsv_pixel}")
+                # Check HSV at center of ROI
+                center_hsv = hsv[y + h//2, x + w//2]
+                print(f"[HSV @ center] H: {center_hsv[0]}, S: {center_hsv[1]}, V: {center_hsv[2]}")
 
-                # Crop ROI and classify
-                roi = frame[y:y+h, x:x+w]
+                # Classify cropped ROI
                 img = Image.fromarray(roi).convert('RGB').resize(input_size)
                 input_tensor = np.expand_dims(np.array(img, dtype=np.float32) / 255.0, axis=0)
 
@@ -80,17 +80,19 @@ try:
                 pred_index = int(np.argmax(output))
                 label = class_names[pred_index]
                 confidence = float(np.max(output)) * 100
+                print(f"[Classification] {label} ({confidence:.2f}%)")
 
-                # LED + Label
                 activate_led(label)
+
+                # Show label on image
                 cv2.putText(preview, f'{label} ({confidence:.1f}%)', (x, y-10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-                print(f"🧠 Class: {label} | Confidence: {confidence:.2f}%\n")
-
+            else:
+                print(f"[Skipped] Detected contour too small: Area = {area}")
         else:
-            print("⚠️  No object detected in current frame.")
+            print("[Detection] No contours found.")
             activate_led(None)
+
 
 
         # === Show the frame ===

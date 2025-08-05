@@ -1,4 +1,4 @@
-import os, warnings, logging
+import os, warnings, logging, tensorflow as tf
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'       #ignores everything except errors
 logging.getLogger('tensorflow').setLevel
@@ -22,3 +22,15 @@ print(f"\nFinal Validation Accuracy: {acc:.2%}")
 # Save model
 model.save('./copra_classifier/models/copra_model.keras')
 print("\nModel saved to: copra_classifier/models/copra_model.keras")
+
+model = tf.keras.models.load_model("copra_classifier/models/copra_model.keras")
+
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+tflite_model = converter.convert()
+
+with open("copra_classifier/models/copra_model.tflite", "wb") as f:
+    f.write(tflite_model)
+
+print("✅ TFLite conversion successful!")

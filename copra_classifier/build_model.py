@@ -28,18 +28,19 @@ val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
 print('\n🛠️ Building CNN model...')
 
 model = keras.Sequential([
-    layers.Input(shape=(180, 180, 3)),  # explicitly defines input layer
-    layers.Rescaling(1./255),
-    layers.Conv2D(16, 3, activation='relu'),
-    layers.MaxPooling2D(),
-    layers.Conv2D(32, 3, activation='relu'),
-    layers.MaxPooling2D(),
-    layers.Conv2D(64, 3, activation='relu'),
-    layers.MaxPooling2D(),
-    layers.Flatten(),
-    layers.Dense(64, activation='relu'),
-    layers.Dense(len(class_names), activation='softmax')
+    keras.layers.InputLayer(input_shape=(180, 180, 3)),
+    keras.layers.Rescaling(1./255),
+    keras.layers.Conv2D(16, 3, activation='relu'),
+    keras.layers.MaxPooling2D(),
+    keras.layers.Conv2D(32, 3, activation='relu'),
+    keras.layers.MaxPooling2D(),
+    keras.layers.Conv2D(64, 3, activation='relu'),
+    keras.layers.MaxPooling2D(),
+    keras.layers.Flatten(),
+    keras.layers.Dense(64, activation='relu'),
+    keras.layers.Dense(len(class_names), activation='softmax')
 ])
+
 
 # === Compile
 print('\n⚙️ Compiling model...')
@@ -57,3 +58,15 @@ with open('./copra_classifier/models/class_names.txt', 'w') as f:
 # === Show summary
 print('\n📊 Model summary:')
 model.summary()
+
+model = tf.keras.models.load_model("copra_classifier/models/copra_model.keras")
+
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+tflite_model = converter.convert()
+
+with open("copra_classifier/models/copra_model.tflite", "wb") as f:
+    f.write(tflite_model)
+
+print("✅ TFLite conversion successful!")

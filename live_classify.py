@@ -1,12 +1,11 @@
 import time
 import cv2
 import numpy as np
-from PIL import Image
 from tflite_runtime.interpreter import Interpreter
 from picamera2 import Picamera2
 from gpiozero import LED
 
-# === Setup LEDs ===
+# === LED Setup ===
 led_overcooked = LED(17)
 led_raw = LED(27)
 led_standard = LED(22)
@@ -22,90 +21,88 @@ def activate_led(label):
     elif label == "standard":
         led_standard.on()
 
-# === Load class names ===
-with open('copra_classifier/models/class_names.txt', 'r') as f:
-    class_names = [line.strip() for line in f.readlines()]
-
-# === Load TFLite model ===
+# === Model and Labels ===
 model_path = 'copra_classifier/models/copra_model.tflite'
+class_names = ['overcooked', 'raw', 'standard']
+
 interpreter = Interpreter(model_path=model_path)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
-input_size = input_details[0]['shape'][1:3]  # (height, width)
+input_size = input_details[0]['shape'][1:3]  # (180,180)
 
 print(f"✅ Model loaded from: {model_path}")
 print(f"✅ Class labels: {class_names}")
 
-# === Setup PiCamera ===
+# === Setup Camera ===
 picam = Picamera2()
 picam.configure(picam.create_preview_configuration(main={"size": (640, 480)}))
+picam.set_controls({"AwbMode": 1})  # Fix white balance
 picam.start()
 time.sleep(2)
 
-print("📡 Live Classification Running... Press Ctrl+C to stop.")
+print("📡 Live Classification Running (press Ctrl+C to stop)...")
 
-frame_rate = 1
-frame_count = 0
-class_interval = 10
-accum_conf = []
-accum_class = []
+# === Parameters ===
+box_size = 180
+conf_threshold = 65.0  # Only show if confidence is high enough
 
 try:
     while True:
+        start = time.time()
+
         frame = picam.capture_array()
         preview = frame.copy()
 
-        # === Preprocess: Resize and normalize ===
-        img = Image.fromarray(preview).convert("RGB").resize(input_size)
-        input_tensor = np.expand_dims(np.array(img, dtype=np.float32) / 255.0, axis=0)
+        h, w, _ = frame.shape
+        cx, cy = w // 2, h // 2
+        half = box_size // 2
 
-        # === Run inference ===
+        # === Crop center area for model
+        crop = frame[cy-half:cy+half, cx-half:cx+half]
+        resized = cv2.resize(crop, input_size)
+        input_tensor = np.expand_dims(resized.astype(np.float32) / 255.0, axis=0)
+
+        # === Inference
         interpreter.set_tensor(input_details[0]['index'], input_tensor)
         interpreter.invoke()
         output = interpreter.get_tensor(output_details[0]['index'])[0]
 
         pred_index = int(np.argmax(output))
-        label = class_names[pred_index]
+        pred_class = class_names[pred_index]
         confidence = float(np.max(output)) * 100
 
-        accum_conf.append(confidence)
-        accum_class.append(label)
+        if confidence >= conf_threshold:
+            activate_led(pred_class)
+            label_text = f"{pred_class} ({confidence:.1f}%)"
+        else:
+            # Not confident → turn off LEDs, show unknown
+            label_text = "..."
+            led_overcooked.off()
+            led_raw.off()
+            led_standard.off()
 
-        # === Visual output ===
-        cv2.putText(preview, f'{label} ({confidence:.1f}%)', (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        # === Display label and box
+        cv2.rectangle(preview, (cx-half, cy-half), (cx+half, cy+half), (0, 255, 0), 2)
+        cv2.putText(preview, label_text, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
-        cv2.imshow("Live Classification", preview)
+        cv2.imshow("Live Copra Classification", preview)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-        frame_count += 1
-        if frame_count >= class_interval:
-            final_class = max(set(accum_class), key=accum_class.count)
-            avg_conf = sum(accum_conf) / len(accum_conf)
-
-            print(f"\n📊 [10s Summary]")
-            print(f"   Class: {final_class}")
-            print(f"   Confidence: {avg_conf:.2f}%")
-
-            activate_led(final_class)
-
-            # Reset counters
-            frame_count = 0
-            accum_class.clear()
-            accum_conf.clear()
-
-        time.sleep(1 / frame_rate)
+        # Print FPS
+        fps = 1 / (time.time() - start)
+        print(f"⚡ FPS: {fps:.2f}    Prediction: {label_text}", end='\r')
 
 except KeyboardInterrupt:
-    print("🛑 Stopped by user.")
+    print("\n🛑 Stopped by user.")
 
 finally:
+    led_overcooked.off()
     led_raw.off()
     led_standard.off()
-    led_overcooked.off()
     picam.stop()
     picam.close()
     cv2.destroyAllWindows()

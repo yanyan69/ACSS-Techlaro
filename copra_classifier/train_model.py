@@ -17,8 +17,8 @@ history = model.fit(train_ds, validation_data=val_ds, epochs=EPOCHS)
 
 # Evaluate
 loss, acc = model.evaluate(val_ds)
-print(f"\n✅ Final Validation Accuracy: {acc:.2%}")
+print(f"\nFinal Validation Accuracy: {acc:.2%}")
 
 # Save model
-model.save('models/copra_model.h5')
-print("✅ Model saved to: copra_classifier/models/copra_model.h5")
+model.save('./copra_classifier/models/copra_model.keras')
+print("\nModel saved to: copra_classifier/models/copra_model.keras")

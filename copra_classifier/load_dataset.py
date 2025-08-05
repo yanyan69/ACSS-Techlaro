@@ -1,7 +1,9 @@
 import tensorflow as tf
 import os
 
-def load_dataset(dataset_dir = 'dataset', img_size = (180,180), batch_size=8):
+
+def load_dataset(dataset_dir = './copra_classifier/dataset', img_size = (180,180), batch_size=8):
+
     print('\nLoading datasets...')
 
     train_ds = tf.keras.preprocessing.image_dataset_from_directory(

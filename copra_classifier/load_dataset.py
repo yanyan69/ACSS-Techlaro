@@ -1,29 +1,29 @@
 import tensorflow as tf
 import os
 
-def load_dataset(dataset_dir = 'copra_classifier\dataset', img_size = (180,180), batch_size=8):
-    print('\nLoading data sets...')
+def load_dataset(dataset_dir='copra_classifier/dataset', img_size=(180, 180), batch_size=8):
+    print('\nLoading datasets...')
 
-    print(f'\nLoading from: {os.path.abspath(dataset_dir)}')
-    print(f'\nSubfolders: {os.listdir(dataset_dir)}')
-    
-    #loads train set
     train_ds = tf.keras.preprocessing.image_dataset_from_directory(
-        dataset_dir, 
-        image_size=img_size,
-        batch_size=batch_size
-        )
-
-    #load validation set
-    val_ds = tf.keras.preprocessing.image_dataset_from_directory(
         dataset_dir,
+        validation_split=0.2,
+        subset='training',
+        seed=123,
         image_size=img_size,
         batch_size=batch_size
     )
 
-    print(f"""\nDataset loaded... 
-        \nclass found: {train_ds.class_names}... 
-        \ntraining batches: {len(train_ds)}... 
-        \nvalidation batches: {len(val_ds)}...""")
-    
-    return train_ds, train_ds.class_names
+    val_ds = tf.keras.preprocessing.image_dataset_from_directory(
+        dataset_dir,
+        validation_split=0.2,
+        subset='validation',
+        seed=123,
+        image_size=img_size,
+        batch_size=batch_size
+    )
+
+    print(f"\nClasses found: {train_ds.class_names}")
+    print(f"Training batches: {len(train_ds)}")
+    print(f"Validation batches: {len(val_ds)}")
+
+    return train_ds, val_ds, train_ds.class_names

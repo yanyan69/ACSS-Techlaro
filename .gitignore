@@ -5,7 +5,7 @@ copra_classifier/sample/
 tf210-env/
 acss-env/
 source/
-(experimental)model_training/
+train_utils/
 # Ignore large image types anywhere
 *.png
 *.jpg

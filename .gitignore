@@ -6,6 +6,7 @@ tf210-env/
 acss-env/
 source/
 train_utils/
+datasets/
 # Ignore large image types anywhere
 *.png
 *.jpg

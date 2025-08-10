@@ -1,17 +1,6 @@
 ﻿# Ignore all datasets and images
-copra_classifier/dataset/
-copra_classifier/dataset-temp/
-copra_classifier/sample/
+my_model/
 tf210-env/
-acss-env/
-source/
-train_utils/
-datasets/
-# Ignore large image types anywhere
-*.png
-*.jpg
-*.jpeg
-*.heic
 
 # VSCode and Python stuff
 __pycache__/

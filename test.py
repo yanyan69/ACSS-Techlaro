@@ -57,7 +57,7 @@ class ACSS_App:
         self.main_frame = tk.Frame(self.root, bg='white')
         self.main_frame.grid(row=0, column=1, sticky='nsew')
 
-        # Start/Stop button for sorting/detection
+        # Create widgets once
         self.toggle_button = tk.Button(
             self.main_frame,
             text='Start',
@@ -68,15 +68,11 @@ class ACSS_App:
             fg='white',
             font=('Arial', 14, 'bold')
         )
-        self.toggle_button.pack(pady=10)
-
-        # Label to show detection counts
         self.count_label = tk.Label(self.main_frame, text="Objects detected: 0", font=("Arial", 14), bg="white")
-        self.count_label.pack(pady=10)
-
-        # Label to show video feed
         self.video_label = tk.Label(self.main_frame)
-        self.video_label.pack()
+
+        # Initially show main interface widgets
+        self.show_main_interface()
 
     def toggle_sidebar(self):
         if self.sidebar_expanded:
@@ -92,14 +88,11 @@ class ACSS_App:
 
     def toggle_sorting(self):
         if not self.sorting_running:
-            # Start detection
             self.start_detection()
             self.toggle_button.config(text='Stop', bg='red')
         else:
-            # Stop detection
             self.stop_detection()
             self.toggle_button.config(text='Start', bg='green')
-
         self.sorting_running = not self.sorting_running
 
     def start_detection(self):
@@ -108,7 +101,6 @@ class ACSS_App:
             self.model = YOLO(self.model_path)
         if self.cap is None:
             self.cap = cv2.VideoCapture(self.source)
-
         self.video_thread = threading.Thread(target=self.video_loop, daemon=True)
         self.video_thread.start()
 
@@ -122,7 +114,7 @@ class ACSS_App:
         self.processed_image_count = 0
 
     def video_loop(self):
-        bbox_colors = [(164,120,87), (68,148,228), (93,97,209), (178,182,133), (88,159,106), 
+        bbox_colors = [(164,120,87), (68,148,228), (93,97,209), (178,182,133), (88,159,106),
                       (96,202,231), (159,124,168), (169,162,241), (98,118,150), (172,176,184)]
 
         while not self.stop_event.is_set():
@@ -152,62 +144,55 @@ class ACSS_App:
                     cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
                     object_count += 1
 
-            # Update processed count
             self.processed_image_count += 1
 
-            # Convert BGR to RGB
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(frame)
             imgtk = ImageTk.PhotoImage(image=img)
 
-            # Update Tkinter UI on main thread
             def update_image():
                 self.video_label.imgtk = imgtk
                 self.video_label.config(image=imgtk)
                 self.count_label.config(text=f"Objects detected: {object_count}")
 
             self.root.after(0, update_image)
-
             time.sleep(0.03)  # ~30 FPS
-            
+
     def clear_main_frame(self):
-        for widget in self.main_frame.winfo_children():
-            widget.destroy()
-            
-    def show_main_interface(self):
-        # Hide everything first
         for widget in self.main_frame.winfo_children():
             widget.pack_forget()
 
-        # Show Start/Stop button
+    def show_main_interface(self):
+        self.clear_main_frame()
         self.toggle_button.pack(pady=10)
-
-        # Show detection count label
         self.count_label.pack(pady=10)
-
-        # Show video feed label
         self.video_label.pack()
 
     def show_camera_view(self):
-        # Hide everything first
-        for widget in self.main_frame.winfo_children():
-            widget.pack_forget()
-
-        # Show only the video feed
+        self.clear_main_frame()
+        # Hide controls, show video feed fullscreen
+        self.toggle_button.pack_forget()
+        self.count_label.pack_forget()
         self.video_label.pack(expand=True, fill='both')
 
-        def show_statistics(self):
-            pass
+    def show_statistics(self):
+        self.clear_main_frame()
+        label = tk.Label(self.main_frame, text="Statistics Section (to implement)", font=("Arial", 16))
+        label.pack(pady=20)
 
-        def show_component_status(self):
-            pass
+    def show_component_status(self):
+        self.clear_main_frame()
+        label = tk.Label(self.main_frame, text="Component Status Section (to implement)", font=("Arial", 16))
+        label.pack(pady=20)
 
-        def show_about(self):
-            pass
+    def show_about(self):
+        self.clear_main_frame()
+        label = tk.Label(self.main_frame, text="About Section (to implement)", font=("Arial", 16))
+        label.pack(pady=20)
 
-        def shutdown_app(self):
-            self.stop_detection()
-            self.root.destroy()
+    def shutdown_app(self):
+        self.stop_detection()
+        self.root.destroy()
 
 if __name__ == '__main__':
     root = tk.Tk()

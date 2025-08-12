@@ -23,7 +23,7 @@ class ACSS_App:
         self.setup_ui()
 
         # YOLO related attributes
-        self.model_path = 'runs/detect/train/weights/best.pt'  # Change to your model path
+        self.model_path = 'my_model/train/weights/best.pt'  # Change to your model path
         self.source = 0  # default camera, or replace with video path
         self.model = None
         self.cap = None
@@ -169,12 +169,41 @@ class ACSS_App:
             self.root.after(0, update_image)
 
             time.sleep(0.03)  # ~30 FPS
-
+            
+    def clear_main_frame(self):
+        for widget in self.main_frame.winfo_children():
+            widget.destroy()
+            
     def show_main_interface(self):
-        pass  # you can expand later
+        self.clear_main_frame()
+
+        # Start/Stop toggle button
+        self.toggle_button = tk.Button(
+            self.main_frame,
+            text='Start' if not self.sorting_running else 'Stop',
+            command=self.toggle_sorting,
+            width=10,
+            height=2,
+            bg='green' if not self.sorting_running else 'red',
+            fg='white',
+            font=('Arial', 14, 'bold')
+        )
+        self.toggle_button.pack(pady=10)
+
+        # Detection count label
+        self.count_label = tk.Label(self.main_frame, text=f"Objects detected: 0", font=("Arial", 14), bg="white")
+        self.count_label.pack(pady=10)
+
+        # Video feed label
+        self.video_label = tk.Label(self.main_frame)
+        self.video_label.pack()
 
     def show_camera_view(self):
-        pass  # same here
+        self.clear_main_frame()
+
+        # Just show video feed without buttons or counts
+        self.video_label = tk.Label(self.main_frame)
+        self.video_label.pack(expand=True, fill='both')
 
     def show_statistics(self):
         pass

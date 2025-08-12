@@ -6,6 +6,8 @@ from PIL import Image, ImageTk
 from ultralytics import YOLO
 import time
 
+from picamera2 import Picamera2  # import picamera2
+
 DB_FILE = 'data/acss_stats.db'
 
 class ACSS_App:
@@ -24,9 +26,8 @@ class ACSS_App:
 
         # YOLO related attributes
         self.model_path = 'my_model/train/weights/best.pt'  # Change to your model path
-        self.source = 0  # default camera, or replace with video path
         self.model = None
-        self.cap = None
+        self.picam2 = None
         self.video_thread = None
         self.stop_event = threading.Event()
 
@@ -99,20 +100,21 @@ class ACSS_App:
         self.stop_event.clear()
         if self.model is None:
             self.model = YOLO(self.model_path)
-        if self.cap is None:
-            self.cap = cv2.VideoCapture(self.source)
-            if not self.cap.isOpened():
-                print("Error: Could not open camera.")
-                self.cap = None
-                return
+
+        if self.picam2 is None:
+            self.picam2 = Picamera2()
+            config = self.picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)})
+            self.picam2.configure(config)
+            self.picam2.start()
+
         self.video_thread = threading.Thread(target=self.video_loop, daemon=True)
         self.video_thread.start()
 
     def stop_detection(self):
         self.stop_event.set()
-        if self.cap:
-            self.cap.release()
-            self.cap = None
+        if self.picam2:
+            self.picam2.stop()
+            self.picam2 = None
         self.video_label.config(image='')  # Clear video feed
         self.count_label.config(text="Objects detected: 0")
         self.processed_image_count = 0
@@ -122,9 +124,9 @@ class ACSS_App:
                       (96,202,231), (159,124,168), (169,162,241), (98,118,150), (172,176,184)]
 
         while not self.stop_event.is_set():
-            ret, frame = self.cap.read()
-            if not ret:
-                break
+            frame_bgra = self.picam2.capture_array()
+            # Convert BGRA to BGR
+            frame = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
 
             results = self.model(frame, verbose=False)
             detections = results[0].boxes

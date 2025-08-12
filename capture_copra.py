@@ -22,9 +22,10 @@ def capture_image(mode):
     image = picam2.capture_array()
     cv2.imwrite(filename, image)
 
-    # Show indicator
-    status_label.config(text=f"Captured: {mode}", fg="green")
-    window.after(1500, lambda: status_label.config(text=""))  # Clear after 1.5s
+    # Show capture popup in middle of preview
+    popup_label.config(text=f"Captured: {mode}", fg="white", bg="green")
+    popup_label.place(relx=0.5, rely=0.5, anchor="center")
+    window.after(1200, lambda: popup_label.place_forget())  # Hide after 1.2 sec
 
 # Live preview update
 def update_frame():
@@ -43,6 +44,9 @@ window.geometry("800x600")
 camera_label = tk.Label(window)
 camera_label.pack()
 
+# Popup capture feedback label (hidden initially)
+popup_label = tk.Label(window, text="", font=("Arial", 18, "bold"), pady=10, padx=20)
+
 # Buttons
 button_frame = tk.Frame(window)
 button_frame.pack()
@@ -50,9 +54,6 @@ button_frame.pack()
 tk.Button(button_frame, text="Standard", command=lambda: capture_image("standard"), bg="lightblue").grid(row=0, column=0, padx=5, pady=5)
 tk.Button(button_frame, text="Raw", command=lambda: capture_image("raw"), bg="lightgreen").grid(row=0, column=1, padx=5, pady=5)
 tk.Button(button_frame, text="Overcooked", command=lambda: capture_image("overcooked"), bg="orange").grid(row=0, column=2, padx=5, pady=5)
-
-status_label = tk.Label(window, text="", font=("Arial", 14))
-status_label.pack(pady=10)
 
 update_frame()
 window.mainloop()

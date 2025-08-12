@@ -175,48 +175,39 @@ class ACSS_App:
             widget.destroy()
             
     def show_main_interface(self):
-        self.clear_main_frame()
+        # Hide everything first
+        for widget in self.main_frame.winfo_children():
+            widget.pack_forget()
 
-        # Start/Stop toggle button
-        self.toggle_button = tk.Button(
-            self.main_frame,
-            text='Start' if not self.sorting_running else 'Stop',
-            command=self.toggle_sorting,
-            width=10,
-            height=2,
-            bg='green' if not self.sorting_running else 'red',
-            fg='white',
-            font=('Arial', 14, 'bold')
-        )
+        # Show Start/Stop button
         self.toggle_button.pack(pady=10)
 
-        # Detection count label
-        self.count_label = tk.Label(self.main_frame, text=f"Objects detected: 0", font=("Arial", 14), bg="white")
+        # Show detection count label
         self.count_label.pack(pady=10)
 
-        # Video feed label
-        self.video_label = tk.Label(self.main_frame)
+        # Show video feed label
         self.video_label.pack()
 
     def show_camera_view(self):
-        self.clear_main_frame()
+        # Hide everything first
+        for widget in self.main_frame.winfo_children():
+            widget.pack_forget()
 
-        # Just show video feed without buttons or counts
-        self.video_label = tk.Label(self.main_frame)
+        # Show only the video feed
         self.video_label.pack(expand=True, fill='both')
 
-    def show_statistics(self):
-        pass
+        def show_statistics(self):
+            pass
 
-    def show_component_status(self):
-        pass
+        def show_component_status(self):
+            pass
 
-    def show_about(self):
-        pass
+        def show_about(self):
+            pass
 
-    def shutdown_app(self):
-        self.stop_detection()
-        self.root.destroy()
+        def shutdown_app(self):
+            self.stop_detection()
+            self.root.destroy()
 
 if __name__ == '__main__':
     root = tk.Tk()

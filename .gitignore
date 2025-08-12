@@ -1,5 +1,4 @@
 ﻿# Ignore all datasets and images
-my_model/
 tf210-env/
 
 # VSCode and Python stuff

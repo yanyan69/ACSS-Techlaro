@@ -101,6 +101,10 @@ class ACSS_App:
             self.model = YOLO(self.model_path)
         if self.cap is None:
             self.cap = cv2.VideoCapture(self.source)
+            if not self.cap.isOpened():
+                print("Error: Could not open camera.")
+                self.cap = None
+                return
         self.video_thread = threading.Thread(target=self.video_loop, daemon=True)
         self.video_thread.start()
 

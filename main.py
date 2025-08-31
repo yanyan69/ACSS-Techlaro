@@ -6,8 +6,6 @@ import serial
 import serial.tools.list_ports
 import time
 import tkinter.messagebox
-from picamera2 import Picamera2, Preview
-from PIL import Image, ImageTk
 
 DB_FILE = 'data/acss_stats.db'
 
@@ -43,7 +41,6 @@ class ACSS_App:
         self.sidebar_expanded = True
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(1, weight=1)
-        self.picam2 = None
         self.init_db()
         self.setup_ui()
 
@@ -123,58 +120,15 @@ class ACSS_App:
     def show_main_interface(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Main Interface", font=("Arial", 16)).pack(pady=20)
-        self.stop_camera()
 
     def show_camera_view(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Camera View", font=("Arial", 16)).pack(pady=20)
-        try:
-            self.picam2 = Picamera2()
-            camera_config = self.picam2.create_still_configuration(main={"size": (640, 480)})
-            self.picam2.configure(camera_config)
-            self.picam2.start_preview(Preview.NULL)  # Use Preview.QTGL for monitor
-            self.picam2.start()
-            tk.Label(self.main_frame, text="Camera started. Click 'Capture' to save an image.", font=("Arial", 12)).pack(pady=10)
-            tk.Button(self.main_frame, text="Capture", command=self.capture_image, width=15).pack(pady=5)
-            self.camera_label = tk.Label(self.main_frame)
-            self.camera_label.pack()
-            self.update_camera_feed()
-        except Exception as e:
-            tk.messagebox.showerror("Camera Error", f"Failed to initialize camera: {e}")
-            print(f"Camera error: {e}")
-            self.stop_camera()
-
-    def capture_image(self):
-        if self.picam2 and self.picam2.started:
-            try:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.picam2.capture_file(f"capture_{timestamp}.jpg")
-                tk.messagebox.showinfo("Success", f"Image saved as capture_{timestamp}.jpg")
-            except Exception as e:
-                tk.messagebox.showerror("Camera Error", f"Failed to capture image: {e}")
-                print(f"Capture error: {e}")
-
-    def update_camera_feed(self):
-        if self.picam2 and self.picam2.started:
-            try:
-                frame = self.picam2.capture_array()
-                if frame.shape[2] == 4:
-                    frame = frame[:, :, :3]
-                image = Image.fromarray(frame)
-                image = image.resize((640, 480), Image.Resampling.LANCZOS)
-                photo = ImageTk.PhotoImage(image)
-                self.camera_label.config(image=photo)
-                self.camera_label.image = photo
-                self.root.after(100, self.update_camera_feed)
-            except Exception as e:
-                print(f"Error updating camera feed: {e}")
-                self.stop_camera()
-                tk.messagebox.showerror("Camera Error", f"Failed to update camera feed: {e}")
+        tk.Label(self.main_frame, text="Camera functionality is not available.", font=("Arial", 12)).pack(pady=10)
 
     def show_statistics(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Statistics", font=("Arial", 16)).pack(pady=20)
-        self.stop_camera()
 
     def show_component_status(self):
         self.clear_main_frame()
@@ -182,7 +136,6 @@ class ACSS_App:
         tk.Button(self.main_frame, text="Stop Servo", width=15, command=lambda: self.send_servo_command('1')).pack(pady=5)
         tk.Button(self.main_frame, text="Rotate +60°", width=15, command=lambda: self.send_servo_command('2')).pack(pady=5)
         tk.Button(self.main_frame, text="Rotate -60°", width=15, command=lambda: self.send_servo_command('3')).pack(pady=5)
-        self.stop_camera()
 
     def send_servo_command(self, cmd):
         if arduino is None:
@@ -203,19 +156,8 @@ class ACSS_App:
     def show_about(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="About ACSS", font=("Arial", 16)).pack(pady=20)
-        self.stop_camera()
-
-    def stop_camera(self):
-        if self.picam2:
-            try:
-                self.picam2.stop()
-                self.picam2.close()
-                self.picam2 = None
-            except Exception as e:
-                print(f"Error stopping camera: {e}")
 
     def shutdown_app(self):
-        self.stop_camera()
         if arduino is not None:
             arduino.close()
         self.root.destroy()

@@ -3,13 +3,28 @@ import sqlite3
 from datetime import datetime
 import os
 import serial
+import serial.tools.list_ports
 import time
 
 DB_FILE = 'data/acss_stats.db'
 
-# 🔹 Setup Arduino Serial Connection (update COM3 to your Arduino port!)
-arduino = serial.Serial(port='COM6', baudrate=9600, timeout=1)
-time.sleep(2)  # wait for Arduino reset
+# 🔹 Setup Arduino Serial Connection
+def find_arduino_port():
+    ports = serial.tools.list_ports.comports()
+    for port in ports:
+        if 'Arduino' in port.description or 'CH340' in port.description or 'CH341' in port.description:
+            return port.device
+    return None
+
+try:
+    port = find_arduino_port()
+    if port is None:
+        raise Exception("Arduino not found. Please check the connection.")
+    arduino = serial.Serial(port=port, baudrate=9600, timeout=1)
+    time.sleep(2)  # wait for Arduino reset
+except Exception as e:
+    print(f"Error connecting to Arduino: {e}")
+    arduino = None  # Allow the app to run without Arduino
 
 class ACSS_App:
     def __init__(self, root):
@@ -131,6 +146,16 @@ class ACSS_App:
     def clear_main_frame(self):
         for widget in self.main_frame.winfo_children():
             widget.destroy()
+    
+    def send_servo_command(self, cmd):
+        if arduino is None:
+            print("Arduino not connected!")
+            return
+        try:
+            arduino.write(cmd.encode())
+            print(f"Sent command {cmd} to Arduino")
+        except Exception as e:
+            print("Error sending command:", e)
 
 if __name__ == '__main__':
     root = tk.Tk()

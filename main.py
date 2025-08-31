@@ -5,6 +5,7 @@ import os
 import serial
 import serial.tools.list_ports
 import time
+import tkinter.messagebox
 
 DB_FILE = 'data/acss_stats.db'
 
@@ -12,19 +13,25 @@ DB_FILE = 'data/acss_stats.db'
 def find_arduino_port():
     ports = serial.tools.list_ports.comports()
     for port in ports:
-        if 'Arduino' in port.description or 'CH340' in port.description or 'CH341' in port.description:
+        # Broaden search to include common USB-to-serial descriptions
+        if any(keyword in port.description.lower() for keyword in ['arduino', 'uno', 'ch340', 'ch341', 'usb serial', 'serial']):
+            print(f"Found Arduino on port: {port.device} ({port.description})")
             return port.device
+    print("No Arduino found. Available ports:")
+    for port in ports:
+        print(f"Port: {port.device}, Description: {port.description}")
     return None
 
 try:
     port = find_arduino_port()
     if port is None:
-        raise Exception("Arduino not found. Please check the connection.")
+        print("Arduino not found. Using /dev/ttyUSB0 as fallback.")
+        port = '/dev/ttyUSB0'  # Fallback to /dev/ttyUSB0
     arduino = serial.Serial(port=port, baudrate=9600, timeout=1)
-    time.sleep(2)  # wait for Arduino reset
+    time.sleep(2)  # Wait for Arduino reset
 except Exception as e:
     print(f"Error connecting to Arduino: {e}")
-    arduino = None  # Allow the app to run without Arduino
+    arduino = None
 
 class ACSS_App:
     def __init__(self, root):
@@ -37,7 +44,7 @@ class ACSS_App:
         self.root.grid_columnconfigure(1, weight=1)
         self.init_db()
         self.setup_ui()
-        
+
     def init_db(self):
         os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
         conn = sqlite3.connect(DB_FILE)
@@ -52,13 +59,13 @@ class ACSS_App:
         """)
         conn.commit()
         conn.close()
-        
+
     def setup_ui(self):
         self.sidebar_expanded = True
         self.sidebar = tk.Frame(self.root, bg='#1E1E1E', width=200)
         self.sidebar.grid(row=0, column=0, sticky='ns')
         self.sidebar.grid_propagate(False)
-        
+
         toggle_btn = tk.Button(self.sidebar, text='☰', command=self.toggle_sidebar, bg='#1E1E1E', fg='white', bd=0)
         toggle_btn.pack(fill='x')
 
@@ -76,6 +83,10 @@ class ACSS_App:
 
         self.main_frame = tk.Frame(self.root, bg='white')
         self.main_frame.grid(row=0, column=1, sticky='nsew')
+
+        # Add status label
+        self.status_label = tk.Label(self.main_frame, text="Arduino: Not Connected" if arduino is None else "Arduino: Connected", fg="red" if arduino is None else "green")
+        self.status_label.pack(pady=10)
 
         self.toggle_button = tk.Button(
             self.main_frame,
@@ -100,62 +111,57 @@ class ACSS_App:
             for btn, text in zip(self.buttons, texts):
                 btn.config(text=text, width=20)
         self.sidebar_expanded = not self.sidebar_expanded
-        
+
     def toggle_sorting(self):
         self.sorting_running = not self.sorting_running
         if self.sorting_running:
             self.toggle_button.config(text='Stop', bg='red')
         else:
             self.toggle_button.config(text='Start', bg='green')
-        
+
     def show_main_interface(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Main Interface", font=("Arial", 16)).pack(pady=20)
-        
+
     def show_camera_view(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Camera View", font=("Arial", 16)).pack(pady=20)
-    
+
     def show_statistics(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Statistics", font=("Arial", 16)).pack(pady=20)
-        
+
     def show_component_status(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Component Status", font=("Arial", 16)).pack(pady=20)
 
-        # 🔹 Servo control buttons
+        # Servo control buttons
         tk.Button(self.main_frame, text="Rotate 0°", width=15, command=lambda: self.send_servo_command('1')).pack(pady=5)
         tk.Button(self.main_frame, text="Rotate +60°", width=15, command=lambda: self.send_servo_command('2')).pack(pady=5)
         tk.Button(self.main_frame, text="Rotate -60°", width=15, command=lambda: self.send_servo_command('3')).pack(pady=5)
 
     def send_servo_command(self, cmd):
+        if arduino is None:
+            print("Arduino not connected!")
+            tk.messagebox.showerror("Error", "Arduino not connected. Please check the connection.")
+            return
         try:
             arduino.write(cmd.encode())
             print(f"Sent command {cmd} to Arduino")
         except Exception as e:
-            print("Error sending command:", e)
+            print(f"Error sending command: {e}")
+            tk.messagebox.showerror("Error", f"Failed to send command: {e}")
 
     def show_about(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="About ACSS", font=("Arial", 16)).pack(pady=20)
-    
+
     def shutdown_app(self):
         self.root.destroy()
 
     def clear_main_frame(self):
         for widget in self.main_frame.winfo_children():
             widget.destroy()
-    
-    def send_servo_command(self, cmd):
-        if arduino is None:
-            print("Arduino not connected!")
-            return
-        try:
-            arduino.write(cmd.encode())
-            print(f"Sent command {cmd} to Arduino")
-        except Exception as e:
-            print("Error sending command:", e)
 
 if __name__ == '__main__':
     root = tk.Tk()

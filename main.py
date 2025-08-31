@@ -6,10 +6,8 @@ import serial
 import serial.tools.list_ports
 import time
 import tkinter.messagebox
-from picamera2 import Picamera2
+from picamera2 import Picamera2, Preview
 from PIL import Image, ImageTk
-import cv2
-import numpy as np
 
 DB_FILE = 'data/acss_stats.db'
 
@@ -31,7 +29,7 @@ try:
         print("Arduino not found. Using /dev/ttyUSB0 as fallback.")
         port = '/dev/ttyUSB0'
     arduino = serial.Serial(port=port, baudrate=9600, timeout=1)
-    time.sleep(2)  # Wait for Arduino reset
+    time.sleep(2)
 except Exception as e:
     print(f"Error connecting to Arduino: {e}")
     arduino = None
@@ -43,10 +41,9 @@ class ACSS_App:
         self.root.geometry('900x500')
         self.sorting_running = False
         self.sidebar_expanded = True
-        self.camera = None
-        self.camera_running = False
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(1, weight=1)
+        self.picam2 = None
         self.init_db()
         self.setup_ui()
 
@@ -89,7 +86,6 @@ class ACSS_App:
         self.main_frame = tk.Frame(self.root, bg='white')
         self.main_frame.grid(row=0, column=1, sticky='nsew')
 
-        # Add status label
         self.status_label = tk.Label(self.main_frame, text="Arduino: Not Connected" if arduino is None else "Arduino: Connected", fg="red" if arduino is None else "green")
         self.status_label.pack(pady=10)
 
@@ -107,11 +103,11 @@ class ACSS_App:
 
     def toggle_sidebar(self):
         if self.sidebar_expanded:
-            self.sidebar.config(width=50)  # Collapse
+            self.sidebar.config(width=50)
             for btn in self.buttons:
                 btn.config(text="", width=2)
         else:
-            self.sidebar.config(width=200)  # Expand
+            self.sidebar.config(width=200)
             texts = ["Main Interface", "Camera View", "Statistics", "Component Status", "About", "Exit"]
             for btn, text in zip(self.buttons, texts):
                 btn.config(text=text, width=20)
@@ -125,59 +121,68 @@ class ACSS_App:
             self.toggle_button.config(text='Start', bg='green')
 
     def show_main_interface(self):
-        self.stop_camera()
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Main Interface", font=("Arial", 16)).pack(pady=20)
+        self.stop_camera()
 
     def show_camera_view(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Camera View", font=("Arial", 16)).pack(pady=20)
         try:
-            self.camera = Picamera2()
-            config = self.camera.create_preview_configuration(main={"size": (640, 480)})
-            self.camera.configure(config)
-            self.camera.start()
-            self.camera_running = True
+            self.picam2 = Picamera2()
+            camera_config = self.picam2.create_still_configuration(main={"size": (640, 480)})
+            self.picam2.configure(camera_config)
+            self.picam2.start_preview(Preview.NULL)  # Use Preview.QTGL for monitor
+            self.picam2.start()
+            tk.Label(self.main_frame, text="Camera started. Click 'Capture' to save an image.", font=("Arial", 12)).pack(pady=10)
+            tk.Button(self.main_frame, text="Capture", command=self.capture_image, width=15).pack(pady=5)
             self.camera_label = tk.Label(self.main_frame)
             self.camera_label.pack()
             self.update_camera_feed()
         except Exception as e:
             tk.messagebox.showerror("Camera Error", f"Failed to initialize camera: {e}")
-            self.camera_running = False
+            print(f"Camera error: {e}")
+            self.stop_camera()
+
+    def capture_image(self):
+        if self.picam2 and self.picam2.started:
+            try:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self.picam2.capture_file(f"capture_{timestamp}.jpg")
+                tk.messagebox.showinfo("Success", f"Image saved as capture_{timestamp}.jpg")
+            except Exception as e:
+                tk.messagebox.showerror("Camera Error", f"Failed to capture image: {e}")
+                print(f"Capture error: {e}")
 
     def update_camera_feed(self):
-        if self.camera_running:
+        if self.picam2 and self.picam2.started:
             try:
-                frame = self.camera.capture_array()
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                image = Image.fromarray(frame_rgb)
-                image = image.resize((640, 480), Image.LANCZOS)
+                frame = self.picam2.capture_array()
+                if frame.shape[2] == 4:
+                    frame = frame[:, :, :3]
+                image = Image.fromarray(frame)
+                image = image.resize((640, 480), Image.Resampling.LANCZOS)
                 photo = ImageTk.PhotoImage(image)
                 self.camera_label.config(image=photo)
-                self.camera_label.image = photo  # Keep reference
-                self.root.after(50, self.update_camera_feed)
+                self.camera_label.image = photo
+                self.root.after(100, self.update_camera_feed)
             except Exception as e:
                 print(f"Error updating camera feed: {e}")
                 self.stop_camera()
-
-    def stop_camera(self):
-        if self.camera is not None and self.camera_running:
-            self.camera.stop()
-            self.camera.close()
-            self.camera_running = False
+                tk.messagebox.showerror("Camera Error", f"Failed to update camera feed: {e}")
 
     def show_statistics(self):
-        self.stop_camera()
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Statistics", font=("Arial", 16)).pack(pady=20)
+        self.stop_camera()
 
     def show_component_status(self):
-        self.stop_camera()
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Component Status", font=("Arial", 16)).pack(pady=20)
         tk.Button(self.main_frame, text="Stop Servo", width=15, command=lambda: self.send_servo_command('1')).pack(pady=5)
         tk.Button(self.main_frame, text="Rotate +60°", width=15, command=lambda: self.send_servo_command('2')).pack(pady=5)
         tk.Button(self.main_frame, text="Rotate -60°", width=15, command=lambda: self.send_servo_command('3')).pack(pady=5)
+        self.stop_camera()
 
     def send_servo_command(self, cmd):
         if arduino is None:
@@ -186,7 +191,7 @@ class ACSS_App:
             return
         try:
             arduino.write(cmd.encode())
-            time.sleep(0.5)  # Wait for Arduino response
+            time.sleep(0.5)
             if arduino.in_waiting > 0:
                 response = arduino.readline().decode('utf-8').strip()
                 print(f"Arduino response: {response}")
@@ -196,9 +201,18 @@ class ACSS_App:
             tk.messagebox.showerror("Error", f"Failed to send command: {e}")
 
     def show_about(self):
-        self.stop_camera()
         self.clear_main_frame()
         tk.Label(self.main_frame, text="About ACSS", font=("Arial", 16)).pack(pady=20)
+        self.stop_camera()
+
+    def stop_camera(self):
+        if self.picam2:
+            try:
+                self.picam2.stop()
+                self.picam2.close()
+                self.picam2 = None
+            except Exception as e:
+                print(f"Error stopping camera: {e}")
 
     def shutdown_app(self):
         self.stop_camera()
@@ -207,7 +221,7 @@ class ACSS_App:
         self.root.destroy()
 
     def clear_main_frame(self):
-        for widget in self.main_frame.winfo.met_children():
+        for widget in self.main_frame.winfo_children():
             if widget != self.status_label:
                 widget.destroy()
 

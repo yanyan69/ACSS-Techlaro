@@ -6,6 +6,10 @@ import serial
 import serial.tools.list_ports
 import time
 import tkinter.messagebox
+from picamera2 import Picamera2
+from PIL import Image, ImageTk
+import cv2
+import numpy as np
 
 DB_FILE = 'data/acss_stats.db'
 
@@ -39,6 +43,8 @@ class ACSS_App:
         self.root.geometry('900x500')
         self.sorting_running = False
         self.sidebar_expanded = True
+        self.camera = None
+        self.camera_running = False
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(1, weight=1)
         self.init_db()
@@ -119,21 +125,56 @@ class ACSS_App:
             self.toggle_button.config(text='Start', bg='green')
 
     def show_main_interface(self):
+        self.stop_camera()
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Main Interface", font=("Arial", 16)).pack(pady=20)
 
     def show_camera_view(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Camera View", font=("Arial", 16)).pack(pady=20)
+        try:
+            self.camera = Picamera2()
+            config = self.camera.create_preview_configuration(main={"size": (640, 480)})
+            self.camera.configure(config)
+            self.camera.start()
+            self.camera_running = True
+            self.camera_label = tk.Label(self.main_frame)
+            self.camera_label.pack()
+            self.update_camera_feed()
+        except Exception as e:
+            tk.messagebox.showerror("Camera Error", f"Failed to initialize camera: {e}")
+            self.camera_running = False
+
+    def update_camera_feed(self):
+        if self.camera_running:
+            try:
+                frame = self.camera.capture_array()
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                image = Image.fromarray(frame_rgb)
+                image = image.resize((640, 480), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(image)
+                self.camera_label.config(image=photo)
+                self.camera_label.image = photo  # Keep reference
+                self.root.after(50, self.update_camera_feed)
+            except Exception as e:
+                print(f"Error updating camera feed: {e}")
+                self.stop_camera()
+
+    def stop_camera(self):
+        if self.camera is not None and self.camera_running:
+            self.camera.stop()
+            self.camera.close()
+            self.camera_running = False
 
     def show_statistics(self):
+        self.stop_camera()
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Statistics", font=("Arial", 16)).pack(pady=20)
 
     def show_component_status(self):
+        self.stop_camera()
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Component Status", font=("Arial", 16)).pack(pady=20)
-        # Servo control buttons
         tk.Button(self.main_frame, text="Stop Servo", width=15, command=lambda: self.send_servo_command('1')).pack(pady=5)
         tk.Button(self.main_frame, text="Rotate +60°", width=15, command=lambda: self.send_servo_command('2')).pack(pady=5)
         tk.Button(self.main_frame, text="Rotate -60°", width=15, command=lambda: self.send_servo_command('3')).pack(pady=5)
@@ -155,17 +196,19 @@ class ACSS_App:
             tk.messagebox.showerror("Error", f"Failed to send command: {e}")
 
     def show_about(self):
+        self.stop_camera()
         self.clear_main_frame()
         tk.Label(self.main_frame, text="About ACSS", font=("Arial", 16)).pack(pady=20)
 
     def shutdown_app(self):
+        self.stop_camera()
         if arduino is not None:
-            arduino.close()  # Close serial connection
+            arduino.close()
         self.root.destroy()
 
     def clear_main_frame(self):
-        for widget in self.main_frame.winfo_children():
-            if widget != self.status_label:  # Preserve status label
+        for widget in self.main_frame.winfo.met_children():
+            if widget != self.status_label:
                 widget.destroy()
 
 if __name__ == '__main__':

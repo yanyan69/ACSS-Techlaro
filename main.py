@@ -43,6 +43,7 @@ class ACSS_App:
         self.root.grid_columnconfigure(1, weight=1)
         self.init_db()
         self.setup_ui()
+        self.bind_keys()
 
     def init_db(self):
         os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
@@ -99,6 +100,13 @@ class ACSS_App:
         )
         self.toggle_button.pack(pady=50)
 
+    def bind_keys(self):
+        # Bind keys for servo control
+        self.root.bind('<KeyPress-a>', lambda event: self.send_servo_command('A'))
+        self.root.bind('<KeyPress-d>', lambda event: self.send_servo_command('D'))
+        self.root.bind('<KeyRelease-a>', lambda event: self.send_servo_command('S'))
+        self.root.bind('<KeyRelease-d>', lambda event: self.send_servo_command('S'))
+
     def toggle_sidebar(self):
         if self.sidebar_expanded:
             self.sidebar.config(width=50)  # Collapse
@@ -133,8 +141,8 @@ class ACSS_App:
     def show_component_status(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Component Status", font=("Arial", 16)).pack(pady=20)
-
-        # Updated servo control buttons
+        tk.Label(self.main_frame, text="Keyboard Control: Hold 'A' for left, 'D' for right, release to stop", font=("Arial", 12)).pack(pady=10)
+        # Servo control buttons
         tk.Button(self.main_frame, text="Stop Servo", width=15, command=lambda: self.send_servo_command('1')).pack(pady=5)
         tk.Button(self.main_frame, text="Rotate +30°", width=15, command=lambda: self.send_servo_command('2')).pack(pady=5)
         tk.Button(self.main_frame, text="Rotate -30°", width=15, command=lambda: self.send_servo_command('3')).pack(pady=5)
@@ -146,7 +154,7 @@ class ACSS_App:
             return
         try:
             arduino.write(cmd.encode())
-            time.sleep(0.5)  # Wait for Arduino response
+            time.sleep(0.1)  # Short delay for Arduino response
             if arduino.in_waiting > 0:
                 response = arduino.readline().decode('utf-8').strip()
                 print(f"Arduino response: {response}")

@@ -13,7 +13,6 @@ DB_FILE = 'data/acss_stats.db'
 def find_arduino_port():
     ports = serial.tools.list_ports.comports()
     for port in ports:
-        # Broaden search to include common USB-to-serial descriptions
         if any(keyword in port.description.lower() for keyword in ['arduino', 'uno', 'ch340', 'ch341', 'usb serial', 'serial']):
             print(f"Found Arduino on port: {port.device} ({port.description})")
             return port.device
@@ -26,7 +25,7 @@ try:
     port = find_arduino_port()
     if port is None:
         print("Arduino not found. Using /dev/ttyUSB0 as fallback.")
-        port = '/dev/ttyUSB0'  # Fallback to /dev/ttyUSB0
+        port = '/dev/ttyUSB0'
     arduino = serial.Serial(port=port, baudrate=9600, timeout=1)
     time.sleep(2)  # Wait for Arduino reset
 except Exception as e:
@@ -135,10 +134,10 @@ class ACSS_App:
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Component Status", font=("Arial", 16)).pack(pady=20)
 
-        # Servo control buttons
-        tk.Button(self.main_frame, text="Rotate 0°", width=15, command=lambda: self.send_servo_command('1')).pack(pady=5)
-        tk.Button(self.main_frame, text="Rotate +60°", width=15, command=lambda: self.send_servo_command('2')).pack(pady=5)
-        tk.Button(self.main_frame, text="Rotate -60°", width=15, command=lambda: self.send_servo_command('3')).pack(pady=5)
+        # Updated servo control buttons
+        tk.Button(self.main_frame, text="Stop Servo", width=15, command=lambda: self.send_servo_command('1')).pack(pady=5)
+        tk.Button(self.main_frame, text="Rotate +30°", width=15, command=lambda: self.send_servo_command('2')).pack(pady=5)
+        tk.Button(self.main_frame, text="Rotate -30°", width=15, command=lambda: self.send_servo_command('3')).pack(pady=5)
 
     def send_servo_command(self, cmd):
         if arduino is None:
@@ -147,7 +146,11 @@ class ACSS_App:
             return
         try:
             arduino.write(cmd.encode())
-            print(f"Sent command {cmd} to Arduino")
+            time.sleep(0.5)  # Wait for Arduino response
+            if arduino.in_waiting > 0:
+                response = arduino.readline().decode('utf-8').strip()
+                print(f"Arduino response: {response}")
+                tk.messagebox.showinfo("Success", response)
         except Exception as e:
             print(f"Error sending command: {e}")
             tk.messagebox.showerror("Error", f"Failed to send command: {e}")
@@ -157,11 +160,14 @@ class ACSS_App:
         tk.Label(self.main_frame, text="About ACSS", font=("Arial", 16)).pack(pady=20)
 
     def shutdown_app(self):
+        if arduino is not None:
+            arduino.close()  # Close serial connection
         self.root.destroy()
 
     def clear_main_frame(self):
         for widget in self.main_frame.winfo_children():
-            widget.destroy()
+            if widget != self.status_label:  # Preserve status label
+                widget.destroy()
 
 if __name__ == '__main__':
     root = tk.Tk()

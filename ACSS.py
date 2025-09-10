@@ -5,21 +5,23 @@ import os
 import serial
 from serial.tools import list_ports
 import time
-import picamera2  # For RPi5 camera
-import cv2  # For image processing
+import picamera2
+import cv2
 import numpy as np
 from PIL import Image, ImageTk
 from ultralytics import YOLO
 import threading
 
 DB_FILE = 'data/acss_stats.db'
-BAUDRATE = 115200  # Matches Arduino
+BAUDRATE = 115200
 
 class ACSS_App:
     def __init__(self, root):
         self.root = root
-        self.root.title('ACSS Control Panel')
+        self.root.title('Automated Copra Segregation System')
         self.root.geometry('900x500')
+        self.root.attributes('-fullscreen', True)  # Full-screen mode
+        self.root.bind('<Escape>', lambda e: self.toggle_fullscreen())  # Esc to exit fullscreen
         self.sorting_running = False
         self.sidebar_expanded = True
         self.processed_image_count = 0
@@ -27,16 +29,16 @@ class ACSS_App:
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(1, weight=1)
         self.init_db()
-        self.setup_arduino()  # Auto-detect and connect
+        self.setup_arduino()
+        self.setup_model_and_camera()
         self.setup_ui()
         
-        # YOLO and camera attributes
-        self.model_path = 'my_model/train/weights/best.pt'  # Your model path
-        self.model = None
-        self.picam2 = None
-        self.video_thread = None
-        self.stop_event = threading.Event()
-        self.setup_model_and_camera()  # Auto-check/setup
+        # Start listening to Arduino if connected
+        if self.arduino:
+            self.root.after(100, self.listen_to_arduino)
+
+    def toggle_fullscreen(self):
+        self.root.attributes('-fullscreen', not self.root.attributes('-fullscreen'))
 
     def init_db(self):
         os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
@@ -67,28 +69,34 @@ class ACSS_App:
             return None
 
         self.arduino = None
-        try:
-            port = find_arduino_port()
-            if port is None:
-                print("Arduino not found. Using /dev/ttyUSB0 as fallback.")
-                port = '/dev/ttyUSB0'  # Or 'COM3' for Windows fallback
-            self.arduino = serial.Serial(port=port, baudrate=BAUDRATE, timeout=1)
-            time.sleep(2)
-        except Exception as e:
-            print(f"Error connecting to Arduino: {e}")
+        retries = 5
+        for i in range(retries):
+            try:
+                port = find_arduino_port()
+                if port is None:
+                    port = '/dev/ttyUSB0'  # Fallback
+                self.arduino = serial.Serial(port=port, baudrate=BAUDRATE, timeout=1)
+                time.sleep(2)
+                print(f"Arduino connected on {port}")
+                return
+            except Exception as e:
+                print(f"Arduino connection attempt {i+1}/{retries} failed: {e}")
+                time.sleep(2)  # Wait before retry
+        print("Failed to connect to Arduino after retries.")
 
     def setup_model_and_camera(self):
-        # Auto-check model file
+        self.model_path = 'my_model/train/weights/best.pt'
         if not os.path.exists(self.model_path):
             print(f"Error: YOLO model not found at {self.model_path}. Detection disabled.")
-            return
-        try:
-            self.model = YOLO(self.model_path)
-        except Exception as e:
-            print(f"Error loading YOLO model: {e}")
             self.model = None
+        else:
+            try:
+                self.model = YOLO(self.model_path)
+                print("YOLO model loaded.")
+            except Exception as e:
+                print(f"Error loading YOLO model: {e}")
+                self.model = None
 
-        # Auto-check camera (will fail if not on RPi or disconnected)
         try:
             self.picam2 = picamera2.Picamera2()
             config = self.picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)})
@@ -121,7 +129,6 @@ class ACSS_App:
         self.main_frame = tk.Frame(self.root, bg='white')
         self.main_frame.grid(row=0, column=1, sticky='nsew')
 
-        # Create widgets once
         self.toggle_button = tk.Button(
             self.main_frame,
             text='Start',
@@ -134,14 +141,9 @@ class ACSS_App:
         )
         self.count_label = tk.Label(self.main_frame, text="Objects detected: 0", font=("Arial", 14), bg="white")
         self.video_label = tk.Label(self.main_frame)
-        self.status_label = tk.Label(self.main_frame, text="Status: Idle")  # For component status
+        self.status_label = tk.Label(self.main_frame, text="Status: Idle")
 
-        # Initially show main interface
         self.show_main_interface()
-
-        # Start listening to Arduino if connected
-        if self.arduino:
-            self.root.after(100, self.listen_to_arduino)
 
     def toggle_sidebar(self):
         if self.sidebar_expanded:
@@ -160,35 +162,37 @@ class ACSS_App:
             self.start_detection()
             self.toggle_button.config(text='Stop', bg='red')
             if self.arduino:
-                self.send_command("START_SORTING")
+                self.safe_send("START_SORTING")
         else:
             self.stop_detection()
             self.toggle_button.config(text='Start', bg='green')
             if self.arduino:
-                self.send_command("STOP_SORTING")
+                self.safe_send("STOP_SORTING")
         self.sorting_running = not self.sorting_running
 
     def start_detection(self):
         if self.model is None or self.picam2 is None:
-            print("Detection disabled due to missing model or camera.")
+            self.status_label.config(text="Error: Missing model or camera")
             return
-        self.stop_event.clear()
+        self.stop_event = threading.Event()
         try:
             self.picam2.start()
         except Exception as e:
             print(f"Error starting camera: {e}")
+            self.status_label.config(text=f"Error: Camera failed")
             return
         self.video_thread = threading.Thread(target=self.video_loop, daemon=True)
         self.video_thread.start()
 
     def stop_detection(self):
-        self.stop_event.set()
+        if hasattr(self, 'stop_event'):
+            self.stop_event.set()
         if self.picam2:
             try:
                 self.picam2.stop()
             except Exception as e:
                 print(f"Error stopping camera: {e}")
-        self.video_label.config(image='')  # Clear video feed
+        self.video_label.config(image='')
         self.count_label.config(text="Objects detected: 0")
 
     def video_loop(self):
@@ -210,7 +214,6 @@ class ACSS_App:
             detections = results[0].boxes
 
             object_count = 0
-
             for i in range(len(detections)):
                 xyxy_tensor = detections[i].xyxy.cpu()
                 xyxy = xyxy_tensor.numpy().squeeze()
@@ -238,7 +241,7 @@ class ACSS_App:
                 self.count_label.config(text=f"Objects detected: {object_count}")
 
             self.root.after(0, update_image)
-            time.sleep(0.03)  # ~30 FPS
+            time.sleep(0.03)
 
     def clear_main_frame(self):
         for widget in self.main_frame.winfo_children():
@@ -265,8 +268,6 @@ class ACSS_App:
     def show_component_status(self):
         self.clear_main_frame()
         tk.Label(self.main_frame, text="Component Status", font=("Arial", 16)).pack(pady=20)
-
-        # Test buttons (with try-except for robustness)
         tk.Button(self.main_frame, text="Test Motor ON", width=15, command=lambda: self.safe_send("MOTOR_ON")).pack(pady=5)
         tk.Button(self.main_frame, text="Test Motor OFF", width=15, command=lambda: self.safe_send("MOTOR_OFF")).pack(pady=5)
         tk.Button(self.main_frame, text="Test Servo RAW (0°)", width=15, command=lambda: self.safe_send("SERVO_TEST_0")).pack(pady=5)
@@ -274,7 +275,6 @@ class ACSS_App:
         tk.Button(self.main_frame, text="Test Servo REJ (120°)", width=15, command=lambda: self.safe_send("SERVO_TEST_120")).pack(pady=5)
         tk.Button(self.main_frame, text="Read NIR Sensor", width=15, command=self.read_and_display_nir).pack(pady=5)
         tk.Button(self.main_frame, text="Check Proximity", width=15, command=self.check_proximity).pack(pady=5)
-
         self.status_label.pack(pady=10)
 
     def safe_send(self, cmd):
@@ -306,7 +306,8 @@ class ACSS_App:
         tk.Label(self.main_frame, text="About ACSS", font=("Arial", 16)).pack(pady=20)
     
     def shutdown_app(self):
-        self.stop_detection()
+        if hasattr(self, 'stop_event'):
+            self.stop_detection()
         if self.arduino:
             try:
                 self.send_command("STOP_SORTING")
@@ -341,7 +342,7 @@ class ACSS_App:
 
     def process_copra(self):
         if self.picam2 is None or self.model is None:
-            return "REJ"  # Fallback
+            return "REJ"
         try:
             frame_bgra = self.picam2.capture_array()
             frame = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
@@ -355,45 +356,48 @@ class ACSS_App:
         if len(detections) == 0:
             return "REJ"
 
-        # Get highest conf detection
         max_conf_idx = np.argmax([d.conf.item() for d in detections])
-        class_name = self.model.names[int(detections[max_conf_idx].cls.item())].upper()  # e.g., 'RAW', 'STANDARD', 'REJECTED'
+        class_name = self.model.names[int(detections[max_conf_idx].cls.item())].upper()
 
-        # Read NIR for validation
         self.send_command("READ_NIR")
         time.sleep(1)
         nir_data = self.read_serial()
         moisture_class = self.classify_moisture(nir_data)
 
-        # Combine (RQ1 fusion: adjust if mismatch)
         if class_name == "RAW" and moisture_class != "HIGH":
             return "REJ"
         elif class_name == "STANDARD" and moisture_class != "MEDIUM":
             return "REJ"
         elif class_name == "REJECTED":
             return "REJ"
-        return class_name[:3]  # 'RAW', 'STD', 'REJ' for servo
+        return class_name[:3]
 
     def classify_moisture(self, nir_data):
         if "W=" not in nir_data:
             return "UNKNOWN"
-        w_value = float(nir_data.split("W=")[1].split(",")[0])
-        if w_value > 15:  # From calibration
-            return "HIGH"
-        elif 10 <= w_value <= 15:
-            return "MEDIUM"
-        else:
-            return "LOW"
+        try:
+            w_value = float(nir_data.split("W=")[1].split(",")[0])
+            if w_value > 15:
+                return "HIGH"
+            elif 10 <= w_value <= 15:
+                return "MEDIUM"
+            else:
+                return "LOW"
+        except:
+            return "UNKNOWN"
 
     def update_db(self):
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO stats (timestamp, processed_image_count, processed_sensor_count)
-            VALUES (?, ?, ?)
-        """, (datetime.now().isoformat(), self.processed_image_count, self.processed_sensor_count))
-        conn.commit()
-        conn.close()
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO stats (timestamp, processed_image_count, processed_sensor_count)
+                VALUES (?, ?, ?)
+            """, (datetime.now().isoformat(), self.processed_image_count, self.processed_sensor_count))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Error updating DB: {e}")
 
 if __name__ == '__main__':
     root = tk.Tk()

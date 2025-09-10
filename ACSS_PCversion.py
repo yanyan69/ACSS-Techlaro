@@ -8,36 +8,78 @@ import time
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
-from ultralytics import YOLO
 import threading
+
+# Try to import ultralytics (YOLO). If missing, set model to None.
+try:
+    from ultralytics import YOLO
+except Exception:
+    YOLO = None
 
 DB_FILE = 'data/acss_stats.db'
 BAUDRATE = 115200
+IMAGE_PATH = 'resources/images/'  # Folder for icons and member photos
 
 class ACSS_App:
     def __init__(self, root):
         self.root = root
         self.root.title('Automated Copra Segregation System')
-        self.root.geometry('900x500')
-        self.root.attributes('-fullscreen', True)  # Full-screen mode
-        self.root.bind('<Escape>', lambda e: self.toggle_fullscreen())  # Esc to exit fullscreen
+        self.root.geometry('1024x600')  # Optimized for 1024x600 LCD
+        self.root.attributes('-fullscreen', True)  # Start fullscreen
+        # Note: binding with event parameter for Tkinter
+        self.root.bind('<F>', lambda e: self.toggle_fullscreen())
+        self.root.bind('<space>', lambda e: self.toggle_sorting())
+        self.root.bind('<Escape>', lambda e: self.show_component_status())
+        self.root.bind('<A>', lambda e: self.safe_send("SERVO_TEST_0"))    # Servo left
+        self.root.bind('<W>', lambda e: self.safe_send("SERVO_TEST_90"))   # Servo neutral
+        self.root.bind('<D>', lambda e: self.safe_send("SERVO_TEST_180"))  # Servo right
+        self.root.bind('<S>', lambda e: self.toggle_motor())               # Toggle motor
+        self.root.bind('<C>', lambda e: self.toggle_camera_view())        # Toggle camera
+
+        # state vars
         self.sorting_running = False
         self.sidebar_expanded = True
+        self.camera_visible = True
+        self.motor_running = False
         self.processed_image_count = 0
         self.processed_sensor_count = 0
+        self.raw_units = 0
+        self.standard_units = 0
+        self.overcooked_units = 0
+        self.raw_moistures = []
+        self.standard_moistures = []
+        self.overcooked_moistures = []
+        self.start_time = None
+        self.current_user = "default_user"  # Placeholder: extend with login
+
+        # layout config
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(1, weight=1)
+
+        # init
         self.init_db()
         self.setup_arduino()
         self.setup_model_and_camera()
         self.setup_ui()
-        
-        # Start listening to Arduino if connected
+
+        # Start listening to Arduino (if present)
         if self.arduino:
             self.root.after(100, self.listen_to_arduino)
 
     def toggle_fullscreen(self):
         self.root.attributes('-fullscreen', not self.root.attributes('-fullscreen'))
+
+    def toggle_motor(self):
+        self.motor_running = not self.motor_running
+        cmd = "MOTOR_ON" if self.motor_running else "MOTOR_OFF"
+        self.safe_send(cmd)
+
+    def toggle_camera_view(self):
+        self.camera_visible = not self.camera_visible
+        if self.camera_visible:
+            self.video_label.pack(expand=True, fill='both')
+        else:
+            self.video_label.pack_forget()
 
     def init_db(self):
         os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
@@ -47,8 +89,17 @@ class ACSS_App:
             CREATE TABLE IF NOT EXISTS stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, 
                 timestamp TEXT,
+                username TEXT,
                 processed_image_count INTEGER DEFAULT 0,
-                processed_sensor_count INTEGER DEFAULT 0
+                processed_sensor_count INTEGER DEFAULT 0,
+                raw_units INTEGER DEFAULT 0,
+                standard_units INTEGER DEFAULT 0,
+                overcooked_units INTEGER DEFAULT 0,
+                raw_avg_moisture REAL DEFAULT 0.0,
+                standard_avg_moisture REAL DEFAULT 0.0,
+                overcooked_avg_moisture REAL DEFAULT 0.0,
+                total_time TEXT,
+                start_time TEXT
             )
         """)
         conn.commit()
@@ -58,7 +109,7 @@ class ACSS_App:
         def find_arduino_port():
             ports = list_ports.comports()
             for port in ports:
-                desc_lower = port.description.lower()
+                desc_lower = (port.description or "").lower()
                 if any(keyword in desc_lower for keyword in ['arduino', 'uno', 'mega', 'nano', 'ch340', 'ch341', 'usb serial', 'serial']):
                     print(f"Found Arduino on port: {port.device} ({port.description})")
                     return port.device
@@ -73,33 +124,43 @@ class ACSS_App:
             try:
                 port = find_arduino_port()
                 if port is None:
-                    port = '/dev/ttyUSB0'  # Fallback
+                    # Default fallback for Windows; user can change
+                    port = 'COM3' if os.name == 'nt' else '/dev/ttyUSB0'
                 self.arduino = serial.Serial(port=port, baudrate=BAUDRATE, timeout=1)
                 time.sleep(2)
                 print(f"Arduino connected on {port}")
                 return
             except Exception as e:
                 print(f"Arduino connection attempt {i+1}/{retries} failed: {e}")
-                time.sleep(2)  # Wait before retry
+                time.sleep(2)
         print("Failed to connect to Arduino after retries.")
 
     def setup_model_and_camera(self):
+        # YOLO model
         self.model_path = 'my_model/train/weights/best.pt'
-        if os.path.exists(self.model_path):
+        if not os.path.exists(self.model_path) or YOLO is None:
+            if YOLO is None:
+                print("Warning: ultralytics YOLO not importable. Detection disabled.")
+            else:
+                print(f"Error: YOLO model not found at {self.model_path}. Detection disabled.")
+            self.model = None
+        else:
             try:
-                from ultralytics import YOLO
                 self.model = YOLO(self.model_path)
                 print("YOLO model loaded.")
             except Exception as e:
-                print(f"Error loading YOLO: {e}")
+                print(f"Error loading YOLO model: {e}")
                 self.model = None
-        else:
-            print("YOLO model not found. Detection disabled.")
-            self.model = None
 
-        # Webcam for PC (instead of picamera2)
+        # Webcam (PC) using OpenCV
         try:
-            self.cap = cv2.VideoCapture(0)  # 0 = default webcam
+            self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW if os.name == 'nt' else 0)
+            # Try to set a reasonable resolution (users can change)
+            try:
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            except:
+                pass
             if not self.cap.isOpened():
                 raise Exception("Webcam not detected")
             print("Webcam detected and configured.")
@@ -107,27 +168,39 @@ class ACSS_App:
             print(f"Error initializing webcam: {e}. Using placeholder mode.")
             self.cap = None
 
-
     def setup_ui(self):
         self.sidebar = tk.Frame(self.root, bg='#1E1E1E', width=200)
         self.sidebar.grid(row=0, column=0, sticky='ns')
         self.sidebar.grid_propagate(False)
         
-        toggle_btn = tk.Button(self.sidebar, text='☰', command=self.toggle_sidebar, bg='#1E1E1E', fg='white', bd=0)
-        toggle_btn.pack(fill='x')
+        toggle_btn = tk.Button(self.sidebar, text='☰', command=self.toggle_sidebar, bg='#1E1E1E', fg='white', bd=0, font=('Arial', 16))
+        toggle_btn.pack(fill='x', pady=10)
 
-        self.buttons = [
-            tk.Button(self.sidebar, text="Main Interface", command=self.show_main_interface),
-            tk.Button(self.sidebar, text="Camera View", command=self.show_camera_view),
-            tk.Button(self.sidebar, text="Statistics", command=self.show_statistics),
-            tk.Button(self.sidebar, text="Component Status", command=self.show_component_status),
-            tk.Button(self.sidebar, text="About", command=self.show_about),
-            tk.Button(self.sidebar, text="Exit", command=self.shutdown_app)
-        ]
+        # Sidebar icons (50x50 PNGs in resources/images/)
+        icon_files = ['main_interface_icon.png', 'statistics_icon.png', 'component_status_icon.png', 'about_icon.png', 'exit_icon.png']
+        self.icons = []
+        for f in icon_files:
+            try:
+                img = tk.PhotoImage(file=os.path.join(IMAGE_PATH, f))
+                self.icons.append(img)
+            except Exception as e:
+                print(f"Error loading icon {f}: {e}")
+                self.icons.append(None)  # Fallback if image missing
 
-        for btn in self.buttons:
-            btn.pack(fill='x')
+        self.icon_buttons = []
+        self.icon_labels = []
+        commands = [self.show_main_interface, self.show_statistics, self.show_component_status, self.show_about, self.shutdown_app]
+        texts = ["Main Interface", "Statistics", "Component Status", "About", "Exit"]
 
+        for i, (icon, cmd, text) in enumerate(zip(self.icons, commands, texts)):
+            btn = tk.Button(self.sidebar, image=icon, command=cmd, bg='#1E1E1E', bd=0)
+            btn.pack(fill='x', pady=10)
+            self.icon_buttons.append(btn)
+            label = tk.Label(self.sidebar, text=text, bg='#1E1E1E', fg='white', font=('Arial', 14))
+            label.pack(fill='x', padx=10)
+            self.icon_labels.append(label)
+
+        # Main area
         self.main_frame = tk.Frame(self.root, bg='white')
         self.main_frame.grid(row=0, column=1, sticky='nsew')
 
@@ -135,44 +208,46 @@ class ACSS_App:
             self.main_frame,
             text='Start',
             command=self.toggle_sorting,
-            width=10,
-            height=2,
+            width=15,
+            height=3,
             bg='green',
             fg='white',
-            font=('Arial', 14, 'bold')
+            font=('Arial', 16, 'bold')
         )
-        self.count_label = tk.Label(self.main_frame, text="Objects detected: 0", font=("Arial", 14), bg="white")
+        self.count_label = tk.Label(self.main_frame, text="Objects detected: 0", font=("Arial", 16), bg="white")
         self.video_label = tk.Label(self.main_frame)
-        self.status_label = tk.Label(self.main_frame, text="Status: Idle")
+        self.status_label = tk.Label(self.main_frame, text="Status: Idle", font=("Arial", 14), bg="white")
 
         self.show_main_interface()
 
     def toggle_sidebar(self):
-        if self.sidebar_expanded:
-            self.sidebar.config(width=50)
-            for btn in self.buttons:
-                btn.config(text="", width=2)
-        else:
-            self.sidebar.config(width=200)
-            texts = ["Main Interface", "Camera View", "Statistics", "Component Status", "About", "Exit"]
-            for btn, text in zip(self.buttons, texts):
-                btn.config(text=text, width=20)
         self.sidebar_expanded = not self.sidebar_expanded
-        
+        if self.sidebar_expanded:
+            self.sidebar.config(width=200)
+            for label in self.icon_labels:
+                label.pack(fill='x', padx=10)
+        else:
+            self.sidebar.config(width=50)
+            for label in self.icon_labels:
+                label.pack_forget()
+
     def toggle_sorting(self):
         if not self.sorting_running:
             self.start_detection()
             self.toggle_button.config(text='Stop', bg='red')
             if self.arduino:
                 self.safe_send("START_SORTING")
+            self.start_time = datetime.now()
         else:
             self.stop_detection()
             self.toggle_button.config(text='Start', bg='green')
             if self.arduino:
                 self.safe_send("STOP_SORTING")
+            self.start_time = None
         self.sorting_running = not self.sorting_running
 
     def start_detection(self):
+        # require both model & camera to start detection; otherwise just show message
         if self.model is None or self.cap is None:
             self.status_label.config(text="Error: Missing model or camera")
             return
@@ -184,44 +259,70 @@ class ACSS_App:
         if hasattr(self, 'stop_event'):
             self.stop_event.set()
         if self.cap:
-            self.cap.release()
+            try:
+                # release & small delay for camera to close cleanly
+                self.cap.release()
+            except Exception as e:
+                print(f"Error releasing webcam: {e}")
+            # Recreate capture so subsequent starts can re-open it
+            try:
+                self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW if os.name == 'nt' else 0)
+            except:
+                pass
         self.video_label.config(image='')
         self.count_label.config(text="Objects detected: 0")
 
-
     def video_loop(self):
-        bbox_colors = [(164,120,87), (68,148,228), (93,97,209)]
-        while not self.stop_event.is_set():
+        # Color palette for bounding boxes
+        bbox_colors = [(164,120,87), (68,148,228), (93,97,209), (178,182,133), (88,159,106),
+                      (96,202,231), (159,124,168), (169,162,241), (98,118,150), (172,176,184)]
+
+        while not getattr(self, 'stop_event', threading.Event()).is_set():
             if self.cap is None:
                 time.sleep(0.03)
                 continue
             ret, frame = self.cap.read()
-            if not ret:
+            if not ret or frame is None:
+                time.sleep(0.01)
                 continue
 
-            if self.model:
+            try:
                 results = self.model(frame, verbose=False)
                 detections = results[0].boxes
-                object_count = 0
-                for i in range(len(detections)):
+            except Exception as e:
+                # If model inference fails, continue without crashing
+                print(f"Model inference error: {e}")
+                detections = []
+
+            object_count = 0
+            for i in range(len(detections)):
+                try:
                     xyxy = detections[i].xyxy.cpu().numpy().squeeze().astype(int)
                     xmin, ymin, xmax, ymax = xyxy
                     classidx = int(detections[i].cls.item())
                     conf = detections[i].conf.item()
-                    if conf > 0.5:
-                        color = bbox_colors[classidx % len(bbox_colors)]
-                        cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), color, 2)
-                        label = f'{self.model.names[classidx]}: {int(conf*100)}%'
-                        cv2.putText(frame, label, (xmin, ymin-10),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                        object_count += 1
-            else:
-                object_count = 0
+                except Exception as e:
+                    # skip malformed detection
+                    print(f"Detection parse error: {e}")
+                    continue
 
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            imgtk = ImageTk.PhotoImage(image=Image.fromarray(frame))
+                if conf > 0.5:
+                    color = bbox_colors[classidx % len(bbox_colors)]
+                    cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
+                    label = f'{self.model.names[classidx]}: {int(conf*100)}%'
+                    labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    label_ymin = max(ymin, labelSize[1] + 10)
+                    cv2.rectangle(frame, (xmin, label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), color, cv2.FILLED)
+                    cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                    object_count += 1
+
+            # Convert BGR -> RGB for PIL
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            imgtk = ImageTk.PhotoImage(image=img)
 
             def update_image():
+                # Keep reference to avoid GC
                 self.video_label.imgtk = imgtk
                 self.video_label.config(image=imgtk)
                 self.count_label.config(text=f"Objects detected: {object_count}")
@@ -229,45 +330,117 @@ class ACSS_App:
             self.root.after(0, update_image)
             time.sleep(0.03)
 
-
     def clear_main_frame(self):
         for widget in self.main_frame.winfo_children():
             widget.pack_forget()
 
     def show_main_interface(self):
         self.clear_main_frame()
-        self.toggle_button.pack(pady=10)
+        self.toggle_button.pack(pady=20)
         self.count_label.pack(pady=10)
-        self.video_label.pack()
-
-    def show_camera_view(self):
-        self.clear_main_frame()
-        self.toggle_button.pack_forget()
-        self.count_label.pack_forget()
-        self.video_label.pack(expand=True, fill='both')
+        if self.camera_visible:
+            self.video_label.pack(expand=True, fill='both')
 
     def show_statistics(self):
         self.clear_main_frame()
-        tk.Label(self.main_frame, text="Statistics", font=("Arial", 16)).pack(pady=20)
-        stats_label = tk.Label(self.main_frame, text=f"Processed Images: {self.processed_image_count}\nProcessed Sensors: {self.processed_sensor_count}")
-        stats_label.pack(pady=10)
+        tk.Label(self.main_frame, text="Statistics", font=("Arial", 24, 'bold')).pack(pady=20)
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT * FROM stats ORDER BY username, timestamp")
+        rows = c.fetchall()
+        conn.close()
+
+        if not rows:
+            tk.Label(self.main_frame, text="No stats available.", font=("Arial", 16)).pack(pady=10)
+            return
+
+        prev_user = None
+        for row in rows:
+            user = row[2]
+            if user != prev_user:
+                tk.Label(self.main_frame, text=f"User: {user} (Last Modified: {row[1]})", font=("Arial", 18, 'bold')).pack(pady=10, anchor='w')
+                prev_user = user
+
+            tk.Label(self.main_frame, text=f"Raw: {row[5]} units, Avg Moisture: {row[8]:.2f}%", font=("Arial", 14)).pack(anchor='w', padx=20)
+            tk.Label(self.main_frame, text=f"Standard: {row[6]} units, Avg Moisture: {row[9]:.2f}%", font=("Arial", 14)).pack(anchor='w', padx=20)
+            tk.Label(self.main_frame, text=f"Overcooked: {row[7]} units, Avg Moisture: {row[10]:.2f}%", font=("Arial", 14)).pack(anchor='w', padx=20)
+            overall_units = row[5] + row[6] + row[7]
+            overall_moisture = (row[8] * row[5] + row[9] * row[6] + row[10] * row[7]) / overall_units if overall_units > 0 else 0
+            tk.Label(self.main_frame, text=f"Overall: {overall_units} units, Avg Moisture: {overall_moisture:.2f}%", font=("Arial", 14)).pack(anchor='w', padx=20)
+            tk.Label(self.main_frame, text=f"Process Time: {row[11]}, Started: {row[12]}", font=("Arial", 14)).pack(anchor='w', padx=20)
+            tk.Frame(self.main_frame, height=2, bg="black").pack(fill='x', pady=10)
 
     def show_component_status(self):
         self.clear_main_frame()
-        tk.Label(self.main_frame, text="Component Status", font=("Arial", 16)).pack(pady=20)
-        tk.Button(self.main_frame, text="Test Motor ON", width=15, command=lambda: self.safe_send("MOTOR_ON")).pack(pady=5)
-        tk.Button(self.main_frame, text="Test Motor OFF", width=15, command=lambda: self.safe_send("MOTOR_OFF")).pack(pady=5)
-        tk.Button(self.main_frame, text="Test Servo RAW (0°)", width=15, command=lambda: self.safe_send("SERVO_TEST_0")).pack(pady=5)
-        tk.Button(self.main_frame, text="Test Servo STD (60°)", width=15, command=lambda: self.safe_send("SERVO_TEST_60")).pack(pady=5)
-        tk.Button(self.main_frame, text="Test Servo REJ (120°)", width=15, command=lambda: self.safe_send("SERVO_TEST_120")).pack(pady=5)
-        tk.Button(self.main_frame, text="Read NIR Sensor", width=15, command=self.read_and_display_nir).pack(pady=5)
-        tk.Button(self.main_frame, text="Check Proximity", width=15, command=self.check_proximity).pack(pady=5)
-        self.status_label.pack(pady=10)
+        tk.Label(self.main_frame, text="Component Testing", font=("Arial", 24, 'bold')).pack(pady=20)
+
+        # Servo section
+        tk.Label(self.main_frame, text="Servo Motor", font=("Arial", 16)).pack(pady=5)
+        frame = tk.Frame(self.main_frame)
+        frame.pack(fill='x')
+        tk.Button(frame, text="Left (A)", command=lambda: self.safe_send("SERVO_TEST_0"), width=12, height=2, font=("Arial", 14)).pack(side='left', padx=10)
+        tk.Button(frame, text="Neutral (W)", command=lambda: self.safe_send("SERVO_TEST_90"), width=12, height=2, font=("Arial", 14)).pack(side='left', padx=10)
+        tk.Button(frame, text="Right (D)", command=lambda: self.safe_send("SERVO_TEST_180"), width=12, height=2, font=("Arial", 14)).pack(side='left', padx=10)
+        tk.Frame(self.main_frame, height=2, bg="black").pack(fill='x', pady=10)
+
+        # Motor section
+        tk.Label(self.main_frame, text="DC Motor", font=("Arial", 16)).pack(pady=5)
+        tk.Button(self.main_frame, text="Start/Stop (S)", command=self.toggle_motor, width=15, height=2, font=("Arial", 14)).pack()
+        tk.Frame(self.main_frame, height=2, bg="black").pack(fill='x', pady=10)
+
+        # NIR section
+        tk.Label(self.main_frame, text="NIR Sensor", font=("Arial", 16)).pack(pady=5)
+        tk.Button(self.main_frame, text="Read NIR", command=self.read_and_display_nir, width=15, height=2, font=("Arial", 14)).pack()
+        tk.Frame(self.main_frame, height=2, bg="black").pack(fill='x', pady=10)
+
+        # Proximity section
+        tk.Label(self.main_frame, text="Proximity Sensor", font=("Arial", 16)).pack(pady=5)
+        tk.Button(self.main_frame, text="Check Proximity", command=self.check_proximity, width=15, height=2, font=("Arial", 14)).pack()
+        tk.Frame(self.main_frame, height=2, bg="black").pack(fill='x', pady=10)
+
+        # Camera toggle
+        tk.Label(self.main_frame, text="Camera View", font=("Arial", 16)).pack(pady=5)
+        tk.Button(self.main_frame, text="Toggle Camera (C)", command=self.toggle_camera_view, width=15, height=2, font=("Arial", 14)).pack()
+        tk.Frame(self.main_frame, height=2, bg="black").pack(fill='x', pady=10)
+
+        self.status_label.pack(pady=20)
+
+    def show_about(self):
+        self.clear_main_frame()
+        tk.Label(self.main_frame, text="Automated Copra Segregation System", font=("Arial", 24, 'bold')).pack(pady=20)
+        tk.Label(self.main_frame, text="Made by Techlaro Company", font=("Arial", 16)).pack(pady=10)
+
+        members = [
+            ("Member 1", "Lead Engineer", "member1.png"),
+            ("Member 2", "Software Developer", "member2.png"),
+            ("Member 3", "Hardware Specialist", "member3.png"),
+            ("Member 4", "Data Scientist", "member4.png")
+        ]
+        self.member_photos = []
+        for name, pos, img_file in members:
+            frame = tk.Frame(self.main_frame)
+            frame.pack(fill='x', pady=5)
+            try:
+                photo = tk.PhotoImage(file=os.path.join(IMAGE_PATH, img_file))
+                self.member_photos.append(photo)  # Keep reference
+                tk.Label(frame, image=photo).pack(side='left', padx=10)
+            except Exception as e:
+                print(f"Error loading member photo {img_file}: {e}")
+                tk.Label(frame, text="[Photo]").pack(side='left', padx=10)
+            tk.Label(frame, text=f"{name} - {pos}", font=("Arial", 14)).pack(side='left', padx=10)
+
+        tk.Label(self.main_frame, text="Description: The ACSS is a prototype that automates copra sorting using a YOLO model for visual classification and an AS7263 NIR sensor for moisture detection, improving efficiency for small-scale buyers.", font=("Arial", 14)).pack(pady=10, padx=20)
+        tk.Label(self.main_frame, text="Goals: Enhance sorting accuracy, reduce manual errors, and provide a cost-effective automation solution for copra traders in Marinduque.", font=("Arial", 14)).pack(pady=10, padx=20)
+        tk.Label(self.main_frame, text="Info: Built with Raspberry Pi 5, Arduino Uno, AS7263 NIR sensor, servo, DC motor, and proximity sensor. Supports real-time sorting with high accuracy.", font=("Arial", 14)).pack(pady=10, padx=20)
+
+        footer = tk.Label(self.main_frame, text="© 2025 Techlaro Company | Version 1.0 | Contact: info@techlaro.com", font=("Arial", 12), bg="gray", fg="white")
+        footer.pack(side='bottom', fill='x', pady=10)
 
     def safe_send(self, cmd):
         try:
             self.send_command(cmd)
         except Exception as e:
+            # show error on status label but don't crash
             self.status_label.config(text=f"Error: {e}")
 
     def read_and_display_nir(self):
@@ -288,19 +461,25 @@ class ACSS_App:
         except Exception as e:
             self.status_label.config(text=f"Error checking proximity: {e}")
 
-    def show_about(self):
-        self.clear_main_frame()
-        tk.Label(self.main_frame, text="About ACSS", font=("Arial", 16)).pack(pady=20)
-    
     def shutdown_app(self):
-        if hasattr(self, 'stop_event'):
-            self.stop_detection()
+        # Stop detection, close Arduino and webcam
+        try:
+            if hasattr(self, 'stop_event'):
+                self.stop_detection()
+        except Exception:
+            pass
         if self.arduino:
             try:
                 self.send_command("STOP_SORTING")
                 self.arduino.close()
             except Exception as e:
                 print(f"Error closing Arduino: {e}")
+        # Ensure webcam released
+        try:
+            if getattr(self, 'cap', None) and self.cap.isOpened():
+                self.cap.release()
+        except Exception:
+            pass
         self.root.destroy()
 
     def send_command(self, cmd):
@@ -317,28 +496,43 @@ class ACSS_App:
             return "Read error"
 
     def listen_to_arduino(self):
+        # Periodically poll Arduino for events while sorting is running
         if self.sorting_running and self.arduino:
-            response = self.read_serial()
-            if response == "DETECTED":
-                category = self.process_copra()
-                self.send_command(f"SERVO_{category.upper()}")
-                self.processed_image_count += 1
-                self.processed_sensor_count += 1
-                self.update_db()
+            try:
+                response = self.read_serial()
+                if response == "DETECTED":
+                    category = self.process_copra()
+                    # send servo command to Arduino (category like RAW -> SERVO_RAW)
+                    try:
+                        self.send_command(f"SERVO_{category.upper()}")
+                    except Exception as e:
+                        print(f"Error sending servo command: {e}")
+                    # update counts / DB
+                    self.processed_image_count += 1
+                    self.processed_sensor_count += 1
+                    self.update_db()
+            except Exception as e:
+                print(f"listen_to_arduino error: {e}")
         self.root.after(100, self.listen_to_arduino)
 
     def process_copra(self):
-        if self.picam2 is None or self.model is None:
+        # Use webcam frame for classification
+        if self.cap is None or self.model is None:
             return "REJ"
         try:
-            frame_bgra = self.picam2.capture_array()
-            frame = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                return "REJ"
         except Exception as e:
-            print(f"Error capturing for processing: {e}")
+            print(f"Error reading frame for processing: {e}")
             return "REJ"
 
-        results = self.model(frame, verbose=False)
-        detections = results[0].boxes
+        try:
+            results = self.model(frame, verbose=False)
+            detections = results[0].boxes
+        except Exception as e:
+            print(f"Model inference error in process_copra: {e}")
+            return "REJ"
 
         if len(detections) == 0:
             return "REJ"
@@ -346,41 +540,85 @@ class ACSS_App:
         max_conf_idx = np.argmax([d.conf.item() for d in detections])
         class_name = self.model.names[int(detections[max_conf_idx].cls.item())].upper()
 
-        self.send_command("READ_NIR")
-        time.sleep(1)
-        nir_data = self.read_serial()
-        moisture_class = self.classify_moisture(nir_data)
+        # Read NIR via Arduino
+        try:
+            self.send_command("READ_NIR")
+            time.sleep(1)
+            nir_data = self.read_serial()
+        except Exception as e:
+            print(f"NIR read error: {e}")
+            nir_data = ""
+
+        moisture_class, w_value = self.classify_moisture(nir_data)
 
         if class_name == "RAW" and moisture_class != "HIGH":
-            return "REJ"
+            category = "REJ"
         elif class_name == "STANDARD" and moisture_class != "MEDIUM":
-            return "REJ"
-        elif class_name == "REJECTED":
-            return "REJ"
-        return class_name[:3]
+            category = "REJ"
+        elif class_name in ("REJECTED", "OVERCOOKED"):
+            category = "REJ"
+        else:
+            category = class_name[:3]  # RAW, STD, REJ
+
+        # Update counters & moisture logs
+        if category == "RAW":
+            self.raw_units += 1
+            self.raw_moistures.append(w_value)
+        elif category == "STD":
+            self.standard_units += 1
+            self.standard_moistures.append(w_value)
+        elif category == "REJ":
+            self.overcooked_units += 1
+            self.overcooked_moistures.append(w_value)
+
+        return category
 
     def classify_moisture(self, nir_data):
-        if "W=" not in nir_data:
-            return "UNKNOWN"
+        # Expect a string like "...W=12.34,..." - parse W= value
+        if not nir_data or "W=" not in nir_data:
+            return "UNKNOWN", 0
         try:
             w_value = float(nir_data.split("W=")[1].split(",")[0])
             if w_value > 15:
-                return "HIGH"
+                return "HIGH", w_value
             elif 10 <= w_value <= 15:
-                return "MEDIUM"
+                return "MEDIUM", w_value
             else:
-                return "LOW"
-        except:
-            return "UNKNOWN"
+                return "LOW", w_value
+        except Exception as e:
+            print(f"Error parsing NIR data: {e}")
+            return "UNKNOWN", 0
 
     def update_db(self):
         try:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
+            raw_avg = sum(self.raw_moistures) / len(self.raw_moistures) if self.raw_moistures else 0
+            std_avg = sum(self.standard_moistures) / len(self.standard_moistures) if self.standard_moistures else 0
+            over_avg = sum(self.overcooked_moistures) / len(self.overcooked_moistures) if self.overcooked_moistures else 0
+            total_time = str(datetime.now() - self.start_time) if self.start_time else "0:00:00"
+            start_time = self.start_time.isoformat() if self.start_time else datetime.now().isoformat()
             c.execute("""
-                INSERT INTO stats (timestamp, processed_image_count, processed_sensor_count)
-                VALUES (?, ?, ?)
-            """, (datetime.now().isoformat(), self.processed_image_count, self.processed_sensor_count))
+                INSERT INTO stats (
+                    timestamp, username, processed_image_count, processed_sensor_count,
+                    raw_units, standard_units, overcooked_units,
+                    raw_avg_moisture, standard_avg_moisture, overcooked_avg_moisture,
+                    total_time, start_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                datetime.now().isoformat(),
+                self.current_user,
+                self.processed_image_count,
+                self.processed_sensor_count,
+                self.raw_units,
+                self.standard_units,
+                self.overcooked_units,
+                raw_avg,
+                std_avg,
+                over_avg,
+                total_time,
+                start_time
+            ))
             conn.commit()
             conn.close()
         except Exception as e:

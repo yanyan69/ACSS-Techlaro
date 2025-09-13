@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 root = tk.Tk()
 root.title("Automated Copra Segregation System")
 root.geometry("1024x600")  # Initial size, will go fullscreen later
-custom_font = tkFont.Font(family="Arial", size=10)
+custom_font = tkFont.Font(family="Arial", size=10)  # Default font, adjustable as needed
 
 # Global variables
 camera_on = False
@@ -56,7 +56,7 @@ if not os.path.exists(model_path):
     exit(0)
 model = YOLO(model_path, task='detect')
 labels = model.names
-bbox_colors = [(164, 120, 87), (68, 148, 228), (93, 97, 209), (178, 182, 133), (88, 159, 106),
+bbox_colors = [(164, 120, 87), (68, 148, 228), (93, 97, 209), (178, 182, 133), (88, 159, 106), 
                (96, 202, 231), (159, 124, 168), (169, 162, 241), (98, 118, 150), (172, 176, 184)]
 
 # Class name mapping
@@ -152,7 +152,7 @@ def start_sorting(new_batch=True):
     if not camera_on:
         camera_on = True
         picam = Picamera2()
-        config = picam.create_video_configuration(main={"size": (640, 480)}, lores={"size": (320, 240)}, encode="yuv420")
+        config = picam.create_video_configuration(main={"size": (640, 480), "format": "RGB888"})
         picam.configure(config)
         picam.start()
         if not camera_view_on:
@@ -242,12 +242,10 @@ def toggle_camera_view():
 def update_camera():
     global camera_image, last_detections, last_log_time
     if camera_view_on and camera_on and picam:
-        frame = picam.capture_array("main")  # Capture from main stream
+        frame = picam.capture_array()
         if frame is not None:
-            # Convert YUV to RGB for YOLO (picamera2 outputs YUV by default)
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_YUV420p2RGB)
             # Run YOLO inference
-            results = model(frame_rgb, verbose=False)
+            results = model(frame, verbose=False)
             detections = results[0].boxes
             current_detections = []
 
@@ -264,12 +262,12 @@ def update_camera():
 
                 if conf > 0.5:
                     color = bbox_colors[classidx % 10]
-                    cv2.rectangle(frame_rgb, (xmin, ymin), (xmax, ymax), color, 2)
+                    cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
                     label = f'{classname} ({int(conf*100)}%)'
                     label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                     label_ymin = max(ymin, label_size[1] + 10)
-                    cv2.rectangle(frame_rgb, (xmin, label_ymin - label_size[1] - 10), (xmin + label_size[0], label_ymin + 10), color, cv2.FILLED)
-                    cv2.putText(frame_rgb, label, (xmin, label_ymin - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                    cv2.rectangle(frame, (xmin, label_ymin - label_size[1] - 10), (xmin + label_size[0], label_ymin + 10), color, cv2.FILLED)
+                    cv2.putText(frame, label, (xmin, label_ymin - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
                     current_detections.append((classname, conf, (xmin, ymin, xmax, ymax)))
 
             # Check for new detections with debouncing
@@ -288,7 +286,7 @@ def update_camera():
             last_detections = current_detections.copy()
 
             # Convert frame for display
-            camera_image = cv2.resize(frame_rgb, camera_size)
+            camera_image = cv2.resize(frame, camera_size)
             img = Image.fromarray(camera_image)
             photo = ImageTk.PhotoImage(image=img)
             camera_label.config(image=photo)

@@ -3,15 +3,15 @@ from tkinter import ttk, messagebox
 import tkinter.font as tkFont
 import os
 from PIL import Image, ImageTk
+import cv2
 from datetime import datetime
 import json
 import logging
 import random
+import threading
 import numpy as np
 from ultralytics import YOLO
 import time
-from picamera2 import Picamera2
-import cv2  # Kept for YOLO and drawing
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,12 +20,12 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 root = tk.Tk()
 root.title("Automated Copra Segregation System")
 root.geometry("1024x600")  # Initial size, will go fullscreen later
-custom_font = tkFont.Font(family="Arial", size=10)
+custom_font = tkFont.Font(family="Arial", size=10)  # Default font, adjustable as needed
 
 # Global variables
 camera_on = False
 camera_view_on = False
-picam = None
+cap = None
 sorting_active = False
 sorting_start_time = None
 sorting_end_time = None
@@ -44,19 +44,20 @@ profile_size = 100
 padx = 5
 pady = 5
 
-# Global variables for camera updates
-last_detections = []
-last_update_time = None
-last_log_time = None
+# Global variables for camera thread
+camera_running = False
+last_detections = []  # To track new detections
+last_update_time = None  # To track the last UI update time
+last_log_time = None  # To track the last logging time for debouncing
 
 # Initialize YOLO model
-model_path = "my_model/train/weights/best.pt"
+model_path = "my_model/train/weights/best.pt"  # Updated model path
 if not os.path.exists(model_path):
     print("ERROR: Model path is invalid or model was not found. Please update model_path.")
     exit(0)
 model = YOLO(model_path, task='detect')
 labels = model.names
-bbox_colors = [(164, 120, 87), (68, 148, 228), (93, 97, 209), (178, 182, 133), (88, 159, 106),
+bbox_colors = [(164, 120, 87), (68, 148, 228), (93, 97, 209), (178, 182, 133), (88, 159, 106), 
                (96, 202, 231), (159, 124, 168), (169, 162, 241), (98, 118, 150), (172, 176, 184)]
 
 # Class name mapping
@@ -137,12 +138,12 @@ def load_user_batch():
     update_right_frame()
 
 def start_sorting(new_batch=True):
-    global sorting_active, sorting_start_time, sorting_data, camera_on, picam, batch_id, last_log_time
+    global sorting_active, sorting_start_time, sorting_data, camera_on, cap, batch_id, last_log_time
     if new_batch:
         batch_id += 1
         sorting_data = []
         sorting_start_time = datetime.now()
-        last_log_time = None
+        last_log_time = None  # Reset log time on new batch
         logging.debug(f"Starting new batch: {batch_id}")
     else:
         logging.debug(f"Continuing batch: {batch_id}")
@@ -151,11 +152,11 @@ def start_sorting(new_batch=True):
     stop_btn_frame.pack(in_=small_button_frame, padx=5, pady=5, anchor='center')
     if not camera_on:
         camera_on = True
-        picam = Picamera2()
-        config = picam.create_video_configuration(main={"size": (640, 480)}, lores={"size": (320, 240)}, encode="yuv420")
-        picam.configure(config)
-        picam.start()
-        if not camera_view_on:
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            logging.error("Failed to open camera")
+            camera_on = False
+        elif not camera_view_on:
             toggle_camera_view()
     update_right_frame()
 
@@ -177,7 +178,7 @@ def batch_prompt():
         start_sorting(True)
 
 def stop_sorting():
-    global sorting_active, sorting_end_time, camera_on, picam
+    global sorting_active, sorting_end_time, camera_on, cap
     sorting_active = False
     sorting_end_time = datetime.now()
     logging.debug("Stopping sorting, delaying update for 2 seconds")
@@ -185,14 +186,13 @@ def stop_sorting():
     start_btn_frame.pack(in_=small_button_frame, padx=5, pady=5, anchor='center')
     if camera_on:
         camera_on = False
-        if picam:
-            picam.stop()
-            picam.close()
-            picam = None
+        if cap:
+            cap.release()
+            cap = None
         if camera_view_on:
             toggle_camera_view()
     if sorting_data:
-        time.sleep(2)
+        time.sleep(2)  # Delay log and save process by 2 seconds
         data_entry = {
             'batch_id': batch_id,
             'start_time': sorting_start_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -226,28 +226,29 @@ def stop_sorting():
     update_right_frame()
 
 def toggle_camera_view():
-    global camera_view_on
+    global camera_view_on, camera_running
     camera_view_on = not camera_view_on
     logging.debug(f"Camera view toggled to: {camera_view_on}")
     if camera_view_on:
         camera_toggle_frame.pack_forget()
         cancel_camera_frame.pack(in_=camera_frame, padx=5, pady=5, anchor='center')
-        update_camera()
+        if camera_on and cap:
+            camera_running = True
+            update_camera()
     else:
+        camera_running = False
         cancel_camera_frame.pack_forget()
         camera_toggle_frame.pack(in_=camera_frame, padx=5, pady=5, anchor='center')
         camera_label.config(image=placeholder_img)
         camera_label.image = placeholder_img
 
 def update_camera():
-    global camera_image, last_detections, last_log_time
-    if camera_view_on and camera_on and picam:
-        frame = picam.capture_array("main")  # Capture from main stream
-        if frame is not None:
-            # Convert YUV to RGB for YOLO (picamera2 outputs YUV by default)
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_YUV420p2RGB)
+    global camera_running, camera_image, last_detections, last_log_time
+    if camera_view_on and camera_on and cap and camera_running:
+        ret, frame = cap.read()
+        if ret and frame is not None:
             # Run YOLO inference
-            results = model(frame_rgb, verbose=False)
+            results = model(frame, verbose=False)
             detections = results[0].boxes
             current_detections = []
 
@@ -257,20 +258,20 @@ def update_camera():
                 xyxy = xyxy_tensor.numpy().squeeze()
                 xmin, ymin, xmax, ymax = xyxy.astype(int)
                 classidx = int(detections[i].cls.item())
-                original_classname = labels[classidx]
-                classname = class_name_map.get(original_classname, original_classname.replace('_', ' ').title())
+                original_classname = labels[classidx]  # Original class name from model
+                classname = class_name_map.get(original_classname, original_classname.replace('_', ' ').title())  # Map or transform
                 conf = detections[i].conf.item()
-                logging.debug(f"Detected class: {original_classname} -> {classname}")
-
+                logging.debug(f"Detected class: {original_classname} -> {classname}")  # Debug output
+                
                 if conf > 0.5:
                     color = bbox_colors[classidx % 10]
-                    cv2.rectangle(frame_rgb, (xmin, ymin), (xmax, ymax), color, 2)
+                    cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
                     label = f'{classname} ({int(conf*100)}%)'
                     label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                     label_ymin = max(ymin, label_size[1] + 10)
-                    cv2.rectangle(frame_rgb, (xmin, label_ymin - label_size[1] - 10), (xmin + label_size[0], label_ymin + 10), color, cv2.FILLED)
-                    cv2.putText(frame_rgb, label, (xmin, label_ymin - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-                    current_detections.append((classname, conf, (xmin, ymin, xmax, ymax)))
+                    cv2.rectangle(frame, (xmin, label_ymin - label_size[1] - 10), (xmin + label_size[0], label_ymin + 10), color, cv2.FILLED)
+                    cv2.putText(frame, label, (xmin, label_ymin - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                    current_detections.append((classname, conf, (xmin, ymin, xmax, ymax)))  # Include bounding box for uniqueness
 
             # Check for new detections with debouncing
             current_time = datetime.now()
@@ -278,22 +279,23 @@ def update_camera():
             if new_detections and sorting_active and (last_log_time is None or (current_time - last_log_time).total_seconds() >= 2):
                 for classname, conf, bbox in new_detections:
                     unit = 1.0
-                    moisture = 0.0
+                    moisture = 0.0  # Placeholder until AS7263 is integrated
                     description = classname
                     sorting_data.append({'unit': unit, 'description': description, 'moisture': moisture, 'detected_class': classname, 'confidence': conf})
-                    logging.debug(f"Added to sorting_data: {classname}, unit: {unit}")
-                    last_log_time = current_time
-                update_right_frame()
+                    logging.debug(f"Added to sorting_data: {classname}, unit: {unit}")  # Debug output
+                    last_log_time = current_time  # Update last log time
+                update_right_frame()  # Trigger UI update after logging
 
             last_detections = current_detections.copy()
 
             # Convert frame for display
-            camera_image = cv2.resize(frame_rgb, camera_size)
+            camera_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            camera_image = cv2.resize(camera_image, camera_size)
             img = Image.fromarray(camera_image)
             photo = ImageTk.PhotoImage(image=img)
             camera_label.config(image=photo)
             camera_label.image = photo
-        root.after(100, update_camera)  # Adjusted interval for Pi performance
+        root.after(10, update_camera)
 
 def update_right_frame():
     global last_update_time
@@ -350,6 +352,9 @@ def delete_batch_prompt(date, batch_id):
 def update_statistics():
     global frame_order
     for widget in stats_scrollable_frame.winfo_children():
+        destroyed_frames = stats_scrollable_frame.winfo_children()
+        debug_frames[:] = [f for f in debug_frames if f in destroyed_frames or f.winfo_exists()]
+        debug_labels[:] = [l for l in debug_labels if l.winfo_exists() and l.master in debug_frames]
         widget.destroy()
     
     title_frame = wrap_widget(stats_scrollable_frame, "Title Frame", 'pack', fill='x', padx=20, pady=10)
@@ -403,10 +408,12 @@ def update_statistics():
                 if collapse_var.get():
                     date_frame.pack_forget()
                 
+                # Filter based on mapped class names
                 raw_copra = [e for e in batch['entries'] if e['detected_class'] == "Raw Copra"]
                 standard_copra = [e for e in batch['entries'] if e['detected_class'] == "Standard Copra"]
                 overcooked_copra = [e for e in batch['entries'] if e['detected_class'] == "Overcooked Copra"]
                 
+                # Sum the units for each category
                 raw_units = sum(e['unit'] for e in raw_copra) if raw_copra else 0
                 standard_units = sum(e['unit'] for e in standard_copra) if standard_copra else 0
                 overcooked_units = sum(e['unit'] for e in overcooked_copra) if overcooked_copra else 0
@@ -477,6 +484,7 @@ def toggle_collapse(date_frame, collapse_var, collapse_btn, subheading_frame, da
         collapse_btn.config(text="−")
         date_frame.pack(fill='both', expand=True)
     collapse_var.set(not collapse_var.get())
+    frame_order[:] = [(f, df, d, bid) for f, df, d, bid in frame_order if f.winfo_exists() and df.winfo_exists() and d == date and bid == batch_id]
     update_statistics()
 
 def update_debug():
@@ -510,8 +518,8 @@ small_start_img = load_image('start_icon.png', size=(small_start_size, small_sta
 placeholder_img = load_image('default_icon.png', size=camera_size)
 
 # Verify image loading
-for img, name in [(start_img_small, 'start_img_small'), (stop_img, 'stop_img'),
-                  (camera_img, 'camera_img'), (cancel_camera_img, 'cancel_camera_img'),
+for img, name in [(start_img_small, 'start_img_small'), (stop_img, 'stop_img'), 
+                  (camera_img, 'camera_img'), (cancel_camera_img, 'cancel_camera_img'), 
                   (small_start_img, 'small_start_img'), (placeholder_img, 'placeholder_img')]:
     if img is None:
         logging.error(f"Image {name} failed to load")
@@ -765,6 +773,7 @@ def get_username():
             with open('data/usernames.json', 'w') as f:
                 json.dump(past_usernames, f)
         username_window.destroy()
+        # Go fullscreen after login
         root.attributes('-fullscreen', True)
         load_user_batch()
         update_right_frame()
@@ -773,6 +782,7 @@ def get_username():
     submit_btn.pack(pady=10, padx=5, ipadx=10, ipady=5)
     username_window.grab_set()
 
+# Autostart simulation and initial setup
 if __name__ == "__main__":
     get_username()
     switch_page("Main Interface")

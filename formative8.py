@@ -11,7 +11,7 @@ from picamera2 import Picamera2
 # -------------------------------
 # User settings
 # -------------------------------
-MODEL_PATH = "runs/detect/train/weights/best.pt"
+MODEL_PATH = "data/my_model.pt"
 RESOLUTION = (640, 480)
 CONF_THRESH = 0.5
 IR1_PIN = 17   # BCM pin for Entry IR sensor

@@ -11,7 +11,7 @@ from ultralytics import YOLO
 # Define and parse user input arguments
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model', help='Path to YOLO model file (example: "yolo/my_model.pt")',
+parser.add_argument('--model', help='Path to YOLO model file (example: "data/my_model.pt")',
                     required=True)
 parser.add_argument('--source', help='Image source, can be image file ("test.jpg"), \
                     image folder ("test_dir"), video file ("testvid.mp4"), index of USB camera ("usb0"), or index of Picamera ("picamera0")', 

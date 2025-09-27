@@ -9,7 +9,7 @@ from ultralytics import YOLO
 from picamera2 import Picamera2
 
 # User settings
-MODEL_PATH = "data/my_model.pt"
+MODEL_PATH = "data/yolo11n.pt"
 RESOLUTION = (640, 480)
 CONF_THRESH = 0.5
 IR1_PIN = 17   # BCM pin for Entry IR sensor

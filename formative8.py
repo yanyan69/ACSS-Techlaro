@@ -4,29 +4,26 @@ import time
 import cv2
 import numpy as np
 import serial
-import RPi.GPIO as GPIO
+import lgpio
 from ultralytics import YOLO
 from picamera2 import Picamera2
 
-# -------------------------------
 # User settings
-# -------------------------------
 MODEL_PATH = "data/my_model.pt"
 RESOLUTION = (640, 480)
 CONF_THRESH = 0.5
 IR1_PIN = 17   # BCM pin for Entry IR sensor
 SERIAL_PORT = "/dev/ttyUSB0"
 BAUDRATE = 9600
-# -------------------------------
 
 # Check model
 if not os.path.exists(MODEL_PATH):
     print("ERROR: Model not found.")
     sys.exit(0)
 
-# Setup GPIO
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(IR1_PIN, GPIO.IN)
+# Setup GPIO (lgpio)
+chip = lgpio.gpiochip_open(0)
+lgpio.gpio_claim_input(chip, IR1_PIN)
 
 # Setup Serial
 arduino = serial.Serial(SERIAL_PORT, BAUDRATE, timeout=1)
@@ -66,10 +63,8 @@ while True:
 
     object_label = None
 
-    # -------------------------------
     # Only classify when IR1 detects object
-    # -------------------------------
-    if GPIO.input(IR1_PIN) == 0:  # assuming LOW = object present
+    if lgpio.gpio_read(chip, IR1_PIN) == 0:  # assuming LOW = object present
         results = model(frame, verbose=False)
         detections = results[0].boxes
 
@@ -92,7 +87,6 @@ while True:
 
         # If valid detection, send to Arduino
         if object_label:
-            # Map to A/B/C (can adjust based on your training labels)
             if object_label == "ObjectA":
                 arduino.write(b"A")
             elif object_label == "ObjectB":
@@ -101,9 +95,8 @@ while True:
                 arduino.write(b"C")
             print(f"Sent {object_label} to Arduino")
 
-    # -------------------------------
+
     # Display info
-    # -------------------------------
     t_stop = time.perf_counter()
     frame_rate = 1 / (t_stop - t_start)
     frame_rate_buffer.append(frame_rate)
@@ -126,5 +119,5 @@ while True:
 print(f"Average pipeline FPS: {avg_frame_rate:.2f}")
 picam.stop()
 cv2.destroyAllWindows()
-GPIO.cleanup()
+lgpio.gpiochip_close(chip)
 arduino.close()

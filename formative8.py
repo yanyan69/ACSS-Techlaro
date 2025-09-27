@@ -87,11 +87,11 @@ while True:
 
         # If valid detection, send to Arduino
         if object_label:
-            if object_label == "ObjectA":
+            if object_label == "apple":
                 arduino.write(b"A")
-            elif object_label == "ObjectB":
+            elif object_label == "toothbrush":
                 arduino.write(b"B")
-            elif object_label == "ObjectC":
+            elif object_label == "remote":
                 arduino.write(b"C")
             print(f"Sent {object_label} to Arduino")
 

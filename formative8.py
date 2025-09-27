@@ -73,13 +73,22 @@ while True:
         if object_label != last_sent:  # avoid same spam
             if object_label == "apple":
                 arduino.write(b"A")
+                print("Sent apple → A")
             elif object_label == "toothbrush":
                 arduino.write(b"B")
+                print("Sent toothbrush → B")
             elif object_label == "remote":
                 arduino.write(b"C")
-            print(f"Sent {object_label} to Arduino")
-            last_sent = object_label
-            last_send_time = time.time()
+                print("Sent remote → C")
+            else:
+                # Ignore all other classes
+                print(f"Ignored {object_label}")
+                object_label = None
+
+            if object_label:  # update only if valid
+                last_sent = object_label
+                last_send_time = time.time()
+
 
     # FPS
     t_stop = time.perf_counter()

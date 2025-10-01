@@ -51,7 +51,7 @@ except Exception:
 
 # ------------------ USER SETTINGS ------------------
 SERIAL_PORT = "/dev/ttyUSB0"   # change if needed
-SERIAL_BAUD = 115200
+SERIAL_BAUD = 9600  # Matched to Arduino
 YOLO_MODEL_PATH = "/my_model/train/weights/best.pt"  # only used if ultralytics available; optional
 CAM_PREVIEW_SIZE = (640, 480)
 # ----------------------------------------------------
@@ -130,10 +130,12 @@ class ACSSGui:
     # ---------- Logging ----------
     def logmsg(self, msg):
         ts = time.strftime("%H:%M:%S")
+        full_msg = f"[{ts}] {msg}"
         self.log.config(state='normal')
-        self.log.insert('end', f"[{ts}] {msg}\n")
+        self.log.insert('end', full_msg + "\n")
         self.log.see('end')
         self.log.config(state='disabled')
+        print(full_msg)  # Console print for debugging
 
     # ---------- Serial ----------
     def open_serial(self):
@@ -149,6 +151,7 @@ class ACSSGui:
             # start reader thread
             t = threading.Thread(target=self.serial_reader_thread, daemon=True)
             t.start()
+            self.logmsg("Serial reader thread started.")  # Extra debug
         except Exception as e:
             self.logmsg("Failed to open serial: " + str(e))
 
@@ -168,12 +171,15 @@ class ACSSGui:
         try:
             with self.serial_lock:
                 self.serial.write((text + "\n").encode())
-                self.logmsg("TX -> " + text)
+                self.logmsg(f"TX -> {text} (sent successfully)")
         except Exception as e:
             self.logmsg("Serial write failed: " + str(e))
 
     def send_sort(self, char):
-        if char not in ('L','C','R'): return
+        if char not in ('L','C','R'): 
+            self.logmsg(f"Invalid sort direction: {char}")
+            return
+        self.logmsg(f"Sending SORT,{char} for servo test")
         self.send_cmd(f"SORT,{char}")
 
     # ---------- Serial reader ----------
@@ -184,7 +190,7 @@ class ACSSGui:
                 line = self.serial.readline().decode(errors='ignore').strip()
                 if not line:
                     continue
-                self.logmsg("RX <- " + line)
+                self.logmsg(f"RX <- {line} (received from Arduino)")
                 # handle lines
                 if line == "IR":
                     # UI reaction: highlight or count
@@ -195,7 +201,7 @@ class ACSSGui:
                     vals = payload.split(",")
                     self.logmsg(f"AS values: {vals}")
                 elif line == "ACK":
-                    self.logmsg("ACK from Arduino")
+                    self.logmsg("ACK from Arduino (action completed)")
                 else:
                     self.logmsg("Serial raw: " + line)
             except Exception as e:
@@ -211,7 +217,7 @@ class ACSSGui:
             self.logmsg("IR monitor already running.")
             return
         self.ir_monitoring = True
-        self.logmsg("IR monitor started (listening to serial IR events).")
+        self.logmsg("IR monitor started (listening to serial IR events). Arduino should send 'IR' continuously when triggered.")
 
     def stop_ir_monitor(self):
         self.ir_monitoring = False
@@ -224,6 +230,7 @@ class ACSSGui:
             return
         # send REQ_AS and wait for one response line that starts with "AS:"
         try:
+            self.logmsg("Sending REQ_AS and waiting for response...")
             with self.serial_lock:
                 self.serial.reset_input_buffer()
                 self.serial.write(b"REQ_AS\n")
@@ -235,12 +242,14 @@ class ACSSGui:
                     line = self.serial.readline().decode(errors='ignore').strip()
                     if not line:
                         continue
-                    self.logmsg("RX <- " + line)
+                    self.logmsg(f"RX during AS wait <- {line}")
                     if line.startswith("AS:"):
                         got = True
                         break
                 if not got:
                     self.logmsg("No AS response within timeout.")
+                else:
+                    self.logmsg("AS response received successfully.")
         except Exception as e:
             self.logmsg("REQ_AS failed: " + str(e))
 
@@ -318,6 +327,7 @@ class ACSSGui:
             self.logmsg("No camera frame available.")
             return
         try:
+            self.logmsg("Running YOLO inference on frame...")
             # ultralytics YOLO wrapper accepts BGR numpy arrays
             res = self.yolo.predict(source=frame, imgsz=640, conf=0.25, max_det=5)
             # res is a list-like; show boxes on frame

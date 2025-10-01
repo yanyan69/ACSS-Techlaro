@@ -52,7 +52,7 @@ except Exception:
 # ------------------ USER SETTINGS ------------------
 SERIAL_PORT = "/dev/ttyUSB0"   # change if needed
 SERIAL_BAUD = 115200
-YOLO_MODEL_PATH = "yolov8n.pt"  # only used if ultralytics available; optional
+YOLO_MODEL_PATH = "/my_model/train/weights/best.pt"  # only used if ultralytics available; optional
 CAM_PREVIEW_SIZE = (640, 480)
 # ----------------------------------------------------
 

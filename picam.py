@@ -7,7 +7,7 @@ from ultralytics import YOLO
 from picamera2 import Picamera2
 
 # User settings
-MODEL_PATH = "runs/detect/train/weights/best.pt"
+MODEL_PATH = "/my_model/train/weights/best.pt"
 RESOLUTION = (640, 480)
 CONF_THRESH = 0.5
 

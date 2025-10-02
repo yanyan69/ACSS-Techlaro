@@ -54,8 +54,10 @@ except Exception:
 try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
+    print("PIL is available")
 except Exception:
     PIL_AVAILABLE = False
+    print("cv2 and numpy is available")
 
 # ------------------ USER SETTINGS ------------------
 SERIAL_PORT = "/dev/ttyUSB0"   # change if needed

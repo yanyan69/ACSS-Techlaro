@@ -318,14 +318,41 @@ class ACSSGui:
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()
-                # Convert from 4-channel BGRA → 3-channel BGR
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+                # --- YOLO INFERENCE ---
+                results = self.yolo(frame, verbose=False)
+                detections = results[0].boxes
+                object_count = 0
+
+                for det in detections:
+                    xyxy = det.xyxy.cpu().numpy().squeeze().astype(int)
+                    xmin, ymin, xmax, ymax = xyxy
+                    classidx = int(det.cls.item())
+                    classname = self.yolo.names[classidx]
+                    conf = det.conf.item()
+
+                    if conf > 0.5:
+                        color = (0, 255, 0)  # you can randomize or map colors
+                        cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
+                        label = f"{classname}: {int(conf*100)}%"
+                        cv2.putText(frame, label, (xmin, max(ymin - 10, 10)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+                        object_count += 1
+
+                # Show object count on screen
+                cv2.putText(frame, f"Objects: {object_count}", (10, 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+
+                # --- pass to Tkinter canvas ---
                 with self.frame_lock:
                     self.latest_frame = frame.copy()
                 self.update_canvas_with_frame(frame)
+
                 time.sleep(0.03)
+
             except Exception as e:
-                self.logmsg("Camera loop error: " + str(e))
+                self.logmsg("YOLO loop error: " + str(e))
                 time.sleep(0.2)
 
     def update_canvas_with_frame(self, bgr_frame):

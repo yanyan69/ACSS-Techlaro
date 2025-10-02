@@ -24,7 +24,7 @@ except Exception:
     ULTRALYTICS_AVAILABLE = False
     print("ultralytics not available")
 
-YOLO_MODEL_PATH = "/my_model/train/weights/best.pt" #change
+YOLO_MODEL_PATH = "my_model/train/weights/best.pt" #change
 CAM_SIZE = (640, 480)
 
 def main():

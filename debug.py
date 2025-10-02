@@ -21,27 +21,35 @@ except Exception as e:
 
 try:
     import serial
+    print("serial is available")
 except Exception:
     serial = None
+    print("serial is available")
 
 try:
     import cv2
     import numpy as np
+    print("cv2 and numpy is available")
 except Exception:
     cv2 = None
     np = None
+    print("cv2 and numpy is not available")
 
 try:
     from picamera2 import Picamera2, Preview
     PICAMERA2_AVAILABLE = True
+    print("picamera is available")
 except Exception:
     PICAMERA2_AVAILABLE = False
+    print("picamera is not available")
 
 try:
     from ultralytics import YOLO
     ULTRALYTICS_AVAILABLE = True
+    print("ultralytics is available")
 except Exception:
     ULTRALYTICS_AVAILABLE = False
+    print("ultralytics is not available")
 
 try:
     from PIL import Image, ImageTk

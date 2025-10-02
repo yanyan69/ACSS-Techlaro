@@ -1,55 +1,53 @@
-"""
-DESCRIPTION:
-this code to capture images from the Raspberry Pi Camera
-
-AUTHOR   : Solehin Rizal
-WEBSITE  : www.cytron.io
-EMAIL    : solehin@cytron.io
-"""
-
-import cv2
 from picamera2 import Picamera2
+import cv2   # CHANGED: use OpenCV instead of Tkinter GUI
+import time
+import os
 
-# Initialize the camera
+# === Setup camera ===
 picam2 = Picamera2()
-picam2.configure(picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)}))
+config = picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)})  # CHANGED: use OpenCV compatible format
+picam2.configure(config)
 picam2.start()
 
-save_path = "/home/pi/" # replace with your path directory
-image_count = 0
+# === Create folders if not exist ===
+folders = ["standard", "raw", "overcooked"]
+for folder in folders:
+    os.makedirs(folder, exist_ok=True)
 
-# Define ROI (x1, y1, x2, y2)
-roi = (200, 100, 440, 380)  # Adjust these values for your ROI
-
-print("Press 'c' to capture an image and 'q' to quit.")
+print("Press '1' for Standard, '2' for Raw, '3' for Overcooked, 'q' to quit.")
 
 while True:
     # Capture a frame
     frame = picam2.capture_array()
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)  # CHANGED: convert to BGR for OpenCV display
 
-    # Draw the ROI rectangle on the frame
-    x1, y1, x2, y2 = roi
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Blue rectangle for ROI
+    # Display live feed
+    cv2.imshow("Copra Image Capture", frame)
 
-    # Display the live feed
-    cv2.imshow("Capturing Images", frame)
+    # Wait for key press
+    key = cv2.waitKey(1) & 0xFF
 
-    # Save an image when 'c' is pressed
-    key = cv2.waitKey(1)
-    if key & 0xFF == ord('c'):
-        # Crop the ROI from the frame
-        cropped_frame = frame[y1:y2, x1:x2]
+    if key == ord('1'):  # CHANGED: Capture to "standard"
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        filename = f"standard/{timestamp}.jpg"
+        cv2.imwrite(filename, frame)
+        print(f"Saved: {filename}")
 
-        # Save the cropped image
-        image_path = f"{save_path}image_{image_count}.jpg"
-        cv2.imwrite(image_path, cropped_frame)
-        print(f"Saved: {image_path}")
-        image_count += 1
+    elif key == ord('2'):  # CHANGED: Capture to "raw"
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        filename = f"raw/{timestamp}.jpg"
+        cv2.imwrite(filename, frame)
+        print(f"Saved: {filename}")
 
-    # Exit on 'q' key press
-    elif key & 0xFF == ord('q'):
+    elif key == ord('3'):  # CHANGED: Capture to "overcooked"
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        filename = f"overcooked/{timestamp}.jpg"
+        cv2.imwrite(filename, frame)
+        print(f"Saved: {filename}")
+
+    elif key == ord('q'):  # Quit
         break
 
+# Cleanup
 cv2.destroyAllWindows()
 picam2.stop()

@@ -64,7 +64,7 @@ while True:
 
     if key == ord('1'):
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"standard/{timestamp}.jpg"
+        filename = f"raw_image/standard/{timestamp}.jpg"
         cv2.imwrite(filename, frame)
         print(f"Saved: {filename}")
         toast_message = "Captured: Standard"
@@ -72,7 +72,7 @@ while True:
 
     elif key == ord('2'):
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"raw/{timestamp}.jpg"
+        filename = f"raw_image/raw/{timestamp}.jpg"
         cv2.imwrite(filename, frame)
         print(f"Saved: {filename}")
         toast_message = "Captured: Raw"
@@ -80,7 +80,7 @@ while True:
 
     elif key == ord('3'):
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"overcooked/{timestamp}.jpg"
+        filename = f"raw_image/overcooked/{timestamp}.jpg"
         cv2.imwrite(filename, frame)
         print(f"Saved: {filename}")
         toast_message = "Captured: Overcooked"

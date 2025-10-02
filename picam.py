@@ -1,87 +1,70 @@
-import os
-import sys
+#!/usr/bin/env python3
+"""
+Simple Camera + YOLO Test (No GUI)
+- Captures frames from PiCamera2
+- Runs YOLO inference on frames (if model available)
+- Shows result with cv2.imshow
+Press 'q' to exit
+"""
+
 import time
 import cv2
-import numpy as np
-from ultralytics import YOLO
-from picamera2 import Picamera2
 
-# User settings
-MODEL_PATH = "/my_model/train/weights/best.pt"
-RESOLUTION = (640, 480)
-CONF_THRESH = 0.5
+try:
+    from picamera2 import Picamera2
+    PICAMERA2_AVAILABLE = True
+except Exception:
+    PICAMERA2_AVAILABLE = False
+    print("picamera2 not available")
 
-if not os.path.exists(MODEL_PATH):
-    print("ERROR: Model not found.")
-    sys.exit(0)
+try:
+    from ultralytics import YOLO
+    ULTRALYTICS_AVAILABLE = True
+except Exception:
+    ULTRALYTICS_AVAILABLE = False
+    print("ultralytics not available")
 
-model = YOLO(MODEL_PATH, task="detect")
-labels = model.names
+YOLO_MODEL_PATH = "/my_model/train/weights/best.pt" #change
+CAM_SIZE = (640, 480)
 
-picam = Picamera2()
-picam.configure(
-    picam.create_video_configuration(main={"format": "RGB888", "size": RESOLUTION})
-)
-picam.start()
+def main():
+    if not PICAMERA2_AVAILABLE:
+        print("Camera not available. Exiting.")
+        return
 
-bbox_colors = [
-    (164, 120, 87), (68, 148, 228), (93, 97, 209), (178, 182, 133),
-    (88, 159, 106), (96, 202, 231), (159, 124, 168), (169, 162, 241),
-    (98, 118, 150), (172, 176, 184)
-]
+    # Initialize camera
+    picam2 = Picamera2()
+    config = picam2.create_preview_configuration(main={"size": CAM_SIZE})
+    picam2.configure(config)
+    picam2.start()
+    time.sleep(1)
 
-avg_frame_rate = 0
-frame_rate_buffer = []
-fps_avg_len = 200
+    # Load YOLO if available
+    yolo = None
+    if ULTRALYTICS_AVAILABLE:
+        try:
+            print("Loading YOLO model...")
+            yolo = YOLO(YOLO_MODEL_PATH)
+            print("YOLO model loaded.")
+        except Exception as e:
+            print("YOLO load failed:", e)
 
-while True:
-    t_start = time.perf_counter()
+    print("Press 'q' to quit.")
+    while True:
+        frame = picam2.capture_array()  # BGR numpy frame
 
-    frame = picam.capture_array()
-    if frame is None:
-        print("Camera error. Exiting...")
-        break
+        if yolo:
+            results = yolo.predict(source=frame, imgsz=640, conf=0.25, max_det=5, verbose=False)
+            frame = results[0].plot()
 
-    results = model(frame, verbose=False)
-    detections = results[0].boxes
-    object_count = 0
+        cv2.imshow("Camera + YOLO Test", frame)
 
-    for det in detections:
-        xyxy = det.xyxy.cpu().numpy().squeeze().astype(int)
-        xmin, ymin, xmax, ymax = xyxy
-        classidx = int(det.cls.item())
-        classname = labels[classidx]
-        conf = det.conf.item()
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-        if conf > CONF_THRESH:
-            color = bbox_colors[classidx % 10]
-            cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
-            label = f"{classname}: {int(conf*100)}%"
-            cv2.putText(frame, label, (xmin, ymin - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            object_count += 1
+    picam2.stop()
+    cv2.destroyAllWindows()
+    print("Camera stopped. Exiting.")
 
-    t_stop = time.perf_counter()
-    frame_rate = 1 / (t_stop - t_start)
-    frame_rate_buffer.append(frame_rate)
-    if len(frame_rate_buffer) > fps_avg_len:
-        frame_rate_buffer.pop(0)
-    avg_frame_rate = np.mean(frame_rate_buffer)
-
-    cv2.putText(frame, f"FPS: {avg_frame_rate:.2f}", (10, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    cv2.putText(frame, f"Objects: {object_count}", (10, 45),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-    cv2.imshow("YOLO PiCamera Detection", frame)
-
-    key = cv2.waitKey(5)
-    if key in [ord("q"), ord("Q")]:
-        break
-    elif key in [ord("p"), ord("P")]:
-        cv2.imwrite("capture.png", frame)
-        print("Saved capture.png")
-
-print(f"Average pipeline FPS: {avg_frame_rate:.2f}")
-picam.stop()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()

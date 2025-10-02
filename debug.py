@@ -62,8 +62,8 @@ except Exception:
 # ------------------ USER SETTINGS ------------------
 SERIAL_PORT = "/dev/ttyUSB0"   # change if needed
 SERIAL_BAUD = 9600  # Matched to Arduino
-YOLO_MODEL_PATH = "/my_model/train/weights/best.pt"  # only used if ultralytics available; optional
-CAM_PREVIEW_SIZE = (640, 480)
+YOLO_MODEL_PATH = "my_model/train/weights/best.pt"  # only used if ultralytics available; optional
+CAM_PREVIEW_SIZE = (480, 360)
 # ----------------------------------------------------
 
 class ACSSGui:
@@ -77,7 +77,9 @@ class ACSSGui:
         # UI elements
         frm = tk.Frame(root)
         frm.pack(padx=8, pady=8)
-
+        frm.rowconfigure(2, weight=1)      # row with log frame expands
+        frm.columnconfigure(0, weight=1)   # left column expands
+        frm.columnconfigure(1, weight=1)   # right column expands
         # connection controls
         conn_frame = tk.LabelFrame(frm, text="Serial / Arduino")
         conn_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
@@ -113,8 +115,10 @@ class ACSSGui:
         # logger
         log_frame = tk.LabelFrame(frm, text="Log")
         log_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=4, pady=4)
-        self.log = scrolledtext.ScrolledText(log_frame, height=12, width=100, state='disabled', wrap='none')
-        self.log.pack()
+        self.log = scrolledtext.ScrolledText(
+            log_frame, height=6, width=80, state='disabled', wrap='none'
+        )
+        self.log.pack(fill='both', expand=True)
 
         # internal state
         self.ir_monitoring = False
@@ -195,18 +199,27 @@ class ACSSGui:
     # ---------- Serial reader ----------
     def serial_reader_thread(self):
         self.logmsg("Serial reader started.")
+        ir_state = False   # False = not detected, True = detected
+        last_ir_report_time = time.time()
+
         while self.serial and self.serial.is_open and self.running:
             try:
                 line = self.serial.readline().decode(errors='ignore').strip()
                 if not line:
+                    # if IR was last seen but now silent for >1s, assume no object
+                    if ir_state and (time.time() - last_ir_report_time > 1.0):
+                        ir_state = False
+                        self.logmsg("IR: No object detected (timeout)")
                     continue
+
                 self.logmsg(f"RX <- {line} (received from Arduino)")
-                # handle lines
+
                 if line == "IR":
-                    # UI reaction: highlight or count
-                    self.logmsg("IR detected (from Arduino)")
+                    last_ir_report_time = time.time()
+                    if not ir_state:  # state changed
+                        ir_state = True
+                        self.logmsg("IR: Object detected within proximity")
                 elif line.startswith("AS:"):
-                    # comma separated values after AS:
                     payload = line[3:]
                     vals = payload.split(",")
                     self.logmsg(f"AS values: {vals}")
@@ -214,6 +227,7 @@ class ACSSGui:
                     self.logmsg("ACK from Arduino (action completed)")
                 else:
                     self.logmsg("Serial raw: " + line)
+
             except Exception as e:
                 self.logmsg("Serial reader exception: " + str(e))
                 time.sleep(0.1)
@@ -273,13 +287,16 @@ class ACSSGui:
             return
         try:
             self.picam2 = Picamera2()
-            config = self.picam2.create_preview_configuration(main={"size": CAM_PREVIEW_SIZE})
+            # Match your capture.py settings
+            config = self.picam2.create_preview_configuration(
+                main={"format": 'XRGB8888', "size": (640, 480)}
+            )
             self.picam2.configure(config)
             self.picam2.start()
             self.camera_running = True
             self.camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
             self.camera_thread.start()
-            self.logmsg("Camera started.")
+            self.logmsg("Camera started with XRGB8888 @ 640x480.")
         except Exception as e:
             self.logmsg("Camera start failed: " + str(e))
 
@@ -300,7 +317,9 @@ class ACSSGui:
     def camera_loop(self):
         while self.camera_running:
             try:
-                frame = self.picam2.capture_array()  # BGR numpy array
+                frame = self.picam2.capture_array()
+                # Convert from 4-channel BGRA → 3-channel BGR
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                 with self.frame_lock:
                     self.latest_frame = frame.copy()
                 self.update_canvas_with_frame(frame)

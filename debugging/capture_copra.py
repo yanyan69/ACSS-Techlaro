@@ -90,7 +90,7 @@ while True:
         break
 
     # === NEW: Slow down loop to ~2 FPS ===
-    time.sleep(0.5)
+    time.sleep(1)
 
 # Cleanup
 cv2.destroyAllWindows()

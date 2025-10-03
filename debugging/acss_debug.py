@@ -9,7 +9,7 @@ Notes:
 - This GUI is defensive: each test wrapped in try/except to allow one-by-one testing.
 """
 
-import sys, threading, time, collections, traceback
+import sys, threading, time # CHANGED: Removed unused imports (collections, traceback)
 
 # Optional imports (we'll try them and gracefully degrade)
 try:
@@ -24,16 +24,16 @@ try:
     print("serial is available")
 except Exception:
     serial = None
-    print("serial is available")
+    print("serial is not available") # CHANGED: Fixed print statement to "not available"
 
 try:
     import cv2
     import numpy as np
-    print("cv2 and numpy is available")
+    print("cv2 and numpy are available") # CHANGED: Fixed grammar ("is" to "are")
 except Exception:
     cv2 = None
     np = None
-    print("cv2 and numpy is not available")
+    print("cv2 and numpy are not available") # CHANGED: Fixed grammar and "not"
 
 try:
     from picamera2 import Picamera2, Preview
@@ -57,7 +57,7 @@ try:
     print("PIL is available")
 except Exception:
     PIL_AVAILABLE = False
-    print("cv2 and numpy is available")
+    print("PIL is not available") # CHANGED: Fixed print statement to "PIL is not available"
 
 # ------------------ USER SETTINGS ------------------
 SERIAL_PORT = "/dev/ttyUSB0"   # change if needed
@@ -110,7 +110,7 @@ class ACSSGui:
         self.camera_running = False
         tk.Button(cam_frame, text="Start Camera Preview", command=self.start_camera).pack(side='left', padx=4, pady=4)
         tk.Button(cam_frame, text="Stop Camera", command=self.stop_camera).pack(side='left', padx=4, pady=4)
-        tk.Button(cam_frame, text="Run Single YOLO Frame", command=self.run_yolo_once).pack(side='left', padx=4, pady=4)
+        # CHANGED: Removed "Run Single YOLO Frame" button as per request
 
         # logger
         log_frame = tk.LabelFrame(frm, text="Log")
@@ -140,6 +140,12 @@ class ACSSGui:
 
         # start serial reader background if port auto-opened later
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # CHANGED: Added dynamic button disabling for camera if not available
+        if not PICAMERA2_AVAILABLE:
+            for widget in cam_frame.winfo_children():
+                if isinstance(widget, tk.Button) and widget['text'] in ("Start Camera Preview", "Stop Camera"):
+                    widget.config(state='disabled')
 
     # ---------- Logging ----------
     def logmsg(self, msg):
@@ -190,7 +196,7 @@ class ACSSGui:
             self.logmsg("Serial write failed: " + str(e))
 
     def send_sort(self, char):
-        if char not in ('L','C','R'): 
+        if char not in ('L', 'C', 'R'):  # CHANGED: Added spaces around operators for consistency
             self.logmsg(f"Invalid sort direction: {char}")
             return
         self.logmsg(f"Sending SORT,{char} for servo test")
@@ -207,18 +213,18 @@ class ACSSGui:
                 line = self.serial.readline().decode(errors='ignore').strip()
                 if not line:
                     # if IR was last seen but now silent for >1s, assume no object
-                    if ir_state and (time.time() - last_ir_report_time > 1.0):
+                    if self.ir_monitoring and ir_state and (time.time() - last_ir_report_time > 1.0):  # CHANGED: Gated IR timeout logic with self.ir_monitoring
                         ir_state = False
                         self.logmsg("IR: No object detected (timeout)")
                     continue
 
                 self.logmsg(f"RX <- {line} (received from Arduino)")
 
-                if line == "IR":
+                if self.ir_monitoring and line == "IR":  # CHANGED: Gated IR handling with self.ir_monitoring; assumes binary detection (no distance yet, as per protocol)
                     last_ir_report_time = time.time()
                     if not ir_state:  # state changed
                         ir_state = True
-                        self.logmsg("IR: Object detected within proximity")
+                        self.logmsg("IR: Object detected within proximity")  # NOTE: For distance, update Arduino to send e.g., "IR:distance_value\n" and parse here
                 elif line.startswith("AS:"):
                     payload = line[3:]
                     vals = payload.split(",")
@@ -315,44 +321,49 @@ class ACSSGui:
             self.logmsg("Camera stop error: " + str(e))
 
     def camera_loop(self):
+        frame_counter = 0  # CHANGED: Added counter to throttle YOLO (run every 5 frames to reduce CPU load)
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-                # --- YOLO INFERENCE ---
-                results = self.yolo(frame, verbose=False)
-                detections = results[0].boxes
-                object_count = 0
+                # --- YOLO INFERENCE (throttled) ---
+                if self.yolo and frame_counter % 5 == 0:  # CHANGED: Throttled YOLO to every 5th frame for performance
+                    results = self.yolo(frame, verbose=False, imgsz=640, conf=0.25, max_det=5)  # CHANGED: Made params consistent (added imgsz, conf, max_det for better control)
+                    detections = results[0].boxes
+                    object_count = 0
 
-                for det in detections:
-                    xyxy = det.xyxy.cpu().numpy().squeeze().astype(int)
-                    xmin, ymin, xmax, ymax = xyxy
-                    classidx = int(det.cls.item())
-                    classname = self.yolo.names[classidx]
-                    conf = det.conf.item()
+                    for det in detections:
+                        xyxy = det.xyxy.cpu().numpy().squeeze().astype(int)
+                        xmin, ymin, xmax, ymax = xyxy
+                        classidx = int(det.cls.item())
+                        classname = self.yolo.names[classidx]
+                        conf = det.conf.item()
 
-                    if conf > 0.5:
-                        color = (0, 255, 0)  # you can randomize or map colors
-                        cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
-                        label = f"{classname}: {int(conf*100)}%"
-                        cv2.putText(frame, label, (xmin, max(ymin - 10, 10)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-                        object_count += 1
+                        if conf > 0.5:
+                            color = (0, 255, 0)  # you can randomize or map colors
+                            cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
+                            label = f"{classname}: {int(conf*100)}%"
+                            cv2.putText(frame, label, (xmin, max(ymin - 10, 10)),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+                            object_count += 1
 
-                # Show object count on screen
-                cv2.putText(frame, f"Objects: {object_count}", (10, 25),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+                    # Show object count on screen
+                    cv2.putText(frame, f"Objects: {object_count}", (10, 25),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
 
-                # --- pass to Tkinter canvas ---
+                frame_counter += 1
+
+                # --- pass to Tkinter canvas (resized for preview) ---
                 with self.frame_lock:
-                    self.latest_frame = frame.copy()
-                self.update_canvas_with_frame(frame)
+                    self.latest_frame = frame.copy()  # Keep full-size for potential other uses
+                display_frame = cv2.resize(frame, CAM_PREVIEW_SIZE)  # CHANGED: Added resize for display to fit 480x360 preview without cropping/distortion
+                self.update_canvas_with_frame(display_frame)
 
-                time.sleep(0.03)
+                time.sleep(1/30)  # CHANGED: Adjusted sleep to ~30 FPS for smoother preview
 
             except Exception as e:
-                self.logmsg("YOLO loop error: " + str(e))
+                self.logmsg("Camera loop error: " + str(e))  # CHANGED: Renamed from "YOLO loop error" since it's broader
                 time.sleep(0.2)
 
     def update_canvas_with_frame(self, bgr_frame):
@@ -373,25 +384,7 @@ class ACSSGui:
         except Exception as e:
             self.logmsg("Display frame error: " + str(e))
 
-    def run_yolo_once(self):
-        if not ULTRALYTICS_AVAILABLE or not self.yolo:
-            self.logmsg("YOLO not available or model not loaded.")
-            return
-        with self.frame_lock:
-            frame = None if self.latest_frame is None else self.latest_frame.copy()
-        if frame is None:
-            self.logmsg("No camera frame available.")
-            return
-        try:
-            self.logmsg("Running YOLO inference on frame...")
-            # ultralytics YOLO wrapper accepts BGR numpy arrays
-            res = self.yolo.predict(source=frame, imgsz=640, conf=0.25, max_det=5)
-            # res is a list-like; show boxes on frame
-            annotated = res[0].plot()
-            self.update_canvas_with_frame(annotated)
-            self.logmsg("YOLO ran: " + str(res[0].boxes.shape if hasattr(res[0], 'boxes') else 'no-box-info'))
-        except Exception as e:
-            self.logmsg("YOLO inference error: " + str(e))
+    # CHANGED: Removed run_yolo_once method as per request
 
     # ---------- Shutdown ----------
     def on_close(self):

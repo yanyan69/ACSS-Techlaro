@@ -89,6 +89,9 @@ while True:
     elif key == ord('q'):
         break
 
+    # === NEW: Slow down loop to ~2 FPS ===
+    time.sleep(0.5)
+
 # Cleanup
 cv2.destroyAllWindows()
 picam2.stop()

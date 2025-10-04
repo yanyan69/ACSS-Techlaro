@@ -1,81 +1,103 @@
 #!/usr/bin/env python3
+"""
+ACSS Moisture Sorting Deployment Script
+- Reads AS7263 values via Arduino
+- Computes moisture (calibrated index)
+- Classifies raw/standard/overcooked
+- Sends servo sorting commands
+- Logs all readings
+"""
+
 import serial
-import csv
 import time
+import csv
 
 # ================= SETTINGS =================
-SERIAL_PORT = '/dev/ttyUSB0'   # Change if needed
+SERIAL_PORT = '/dev/ttyUSB0'  # Arduino
 BAUD_RATE = 115200
-FILENAME = "moisture_log.csv"
+LOG_FILE = "data_gathering/data/moisture_log.csv"
 
-# Thresholds (easy to edit)
-RAW_MIN = 20.1        # moisture > RAW_MIN → Raw
-STANDARD_MIN = 10.0   # moisture between STANDARD_MIN and RAW_MIN → Standard
-STANDARD_MAX = 20.0
-OVERCOOKED_MAX = 9.9  # moisture < OVERCOOKED_MAX → Overcooked
+# Thresholds based on your analysis
+OVERCOOKED_MAX = 5.9
+STANDARD_MIN = 6.0
+STANDARD_MAX = 7.0
+RAW_MIN = 7.1
 
+# Servo positions
+SERVO_POS = {"overcooked": 60, "standard": 90, "raw": 120}
 # ======================================================
 
-def classify_moisture(moisture):
-    """Return label based on moisture thresholds."""
-    if moisture >= RAW_MIN:
-        return "Raw"
-    elif STANDARD_MIN <= moisture <= STANDARD_MAX:
-        return "Standard"
-    elif moisture <= OVERCOOKED_MAX:
-        return "Overcooked"
-    else:
-        return "Unknown"
-
-# Make sure CSV has headers
+# Setup CSV file
+import os
+os.makedirs("data", exist_ok=True)
 try:
-    with open(FILENAME, 'x', newline='') as f:
+    with open(LOG_FILE, 'x', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(["Timestamp", "Moisture(%)", "Class", "CH_R", "CH_S", "CH_T", "CH_U", "CH_V", "CH_W"])
+        writer.writerow(["Timestamp", "Moisture(%)", "Class", "CH_R","CH_S","CH_T","CH_U","CH_V","CH_W"])
 except FileExistsError:
     pass
 
+# Open serial
 ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+time.sleep(2)  # wait for Arduino to boot
 
-print("=== AS7263 Moisture Sorter (CLI) ===")
-print("Logging to", FILENAME)
+def classify_moisture(m):
+    """Return class label based on thresholds"""
+    if m <= OVERCOOKED_MAX:
+        return "overcooked"
+    elif STANDARD_MIN <= m <= STANDARD_MAX:
+        return "standard"
+    elif m >= RAW_MIN:
+        return "raw"
+    else:
+        return "unknown"
+
+def send_servo(label):
+    """Send servo sorting command to Arduino"""
+    if label in SERVO_POS:
+        cmd = f"SORT,{label[0].upper()}\n"  # L/C/R based on first letter
+        ser.write(cmd.encode())
+        # optional: wait for ACK
+        ack = ser.readline().decode().strip()
+        print(f"Servo command sent: {cmd.strip()} | Arduino: {ack}")
+
+print("=== ACSS Moisture Sorter Deployment ===")
 print("Press Ctrl+C to stop.")
 
-while True:
-    try:
-        line = ser.readline().decode("utf-8").strip()
-
+try:
+    while True:
+        # Request AS7263 reading
+        ser.write(b"REQ_AS\n")
+        line = ser.readline().decode().strip()
         if not line:
             continue
 
         try:
-            # Parse sensor data
             ch_vals = [float(x) for x in line.split(",")]
-
-            # Example: using CH_R (index 0) as proxy for "moisture"
-            # TODO: replace formula with calibration curve if needed
+            # Example: use channel 1 (CH_R) as moisture proxy
             moisture = ch_vals[0]
 
             if moisture == 0:
-                continue  # Skip noise/empty
+                continue  # skip invalid reading
 
-            # Classify
             label = classify_moisture(moisture)
 
-            # Save to CSV
+            # Log to CSV
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            with open(FILENAME, 'a', newline='') as f:
+            with open(LOG_FILE, 'a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([timestamp, moisture, label] + ch_vals)
 
-            # Print summary line
             print(f"{timestamp} | Moisture={moisture:.2f}% | Class={label}")
 
+            # Send servo command
+            send_servo(label)
+
         except ValueError:
-            continue  # Skip bad lines
+            continue
 
-        time.sleep(1)  # Delay to reduce spamming
+        time.sleep(0.5)  # adjust as needed
 
-    except KeyboardInterrupt:
-        print("\nExiting logger.")
-        break
+except KeyboardInterrupt:
+    print("\nStopping deployment script.")
+    ser.close()

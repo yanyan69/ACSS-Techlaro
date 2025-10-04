@@ -1,0 +1,39 @@
+status: not implemented as of 10/04
+
+//cmd
+sudo nano /etc/systemd/system/acss.service
+
+//paste ito
+[Unit]
+Description=ACSS GUI for Copra System
+After=graphical.target
+
+[Service]
+User=admin
+WorkingDirectory=/home/admin/project/ACSS-Techlaro
+ExecStart=/home/admin/project/ACSS-Techlaro/venv/bin/python3 /home/admin/project/ACSS-Techlaro/acss_gui.py
+Restart=always
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/admin/.Xauthority
+
+[Install]
+WantedBy=graphical.target
+
+//save and exit
+
+//enable ito
+sudo systemctl daemon-reload
+sudo systemctl enable acss.service
+
+//autoboot
+sudo systemctl start acss.service
+
+//for error logs
+journalctl -u acss.service -f
+
+
+
+//commands
+sudo systemctl restart acss.service // restart service after edits
+sudo systemctl stop acss.service //stop for debugging
+sudo systemctl start acss.service //start again

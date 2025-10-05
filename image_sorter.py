@@ -62,7 +62,7 @@ except Exception:
 # ------------------ USER SETTINGS ------------------
 SERIAL_PORT = "/dev/ttyUSB0"   # change if needed
 SERIAL_BAUD = 9600  # Matched to Arduino
-YOLO_MODEL_PATH = "my_model/train/weights/best.pt"  # only used if ultralytics available; optional
+YOLO_MODEL_PATH = "my_model/my_model.pt"  # only used if ultralytics available; optional
 CAM_PREVIEW_SIZE = (480, 360)
 # ----------------------------------------------------
 

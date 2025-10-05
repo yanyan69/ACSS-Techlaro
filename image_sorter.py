@@ -3,13 +3,15 @@
 ACSS YOLO + Servo Test GUI for Raspberry Pi 5.
 - Uses Arduino for servo control via serial: sends "SORT,L\n" or "SORT,C\n" or "SORT,R\n" based on YOLO detection.
 - Detects 'raw-copra', 'standard-copra', 'overcooked-copra' and maps:
-  - raw-copra: SORT,R (right)
-  - standard-copra: SORT,C (center)
-  - overcooked-copra: SORT,L (left)
-- Assumes YOLO classes: e.g., 0='raw-copra', 1='standard-copra', 2='overcooked-copra'
+  - raw-copra / raw: SORT,R (right)
+  - standard-copra / standard: SORT,C (center)
+  - overcooked-copra / overcooked / rejected: SORT,L (left)
+- Detection runs even if serial is not opened. UI updates are scheduled on the main thread to avoid segfaults.
 """
 
-import sys, threading, time
+import sys
+import threading
+import time
 
 # Optional imports (graceful degradation)
 try:
@@ -66,6 +68,20 @@ YOLO_MODEL_PATH = "my_model/my_model.pt"
 CAM_PREVIEW_SIZE = (480, 360)
 # ----------------------------------------------------
 
+# Bounding box colors requested (BGR)
+BOX_COLORS = {
+    'raw': (255, 0, 123),            # Blue-ish (user-specified)
+    'raw-copra': (255, 0, 123),
+    'standard': (40, 167, 69),       # Green
+    'standard-copra': (40, 167, 69),
+    'rejected': (220, 53, 69),       # Red
+    'overcooked': (220, 53, 69),
+    'overcooked-copra': (220, 53, 69),
+}
+
+# A short cooldown (seconds) to reduce repeated logs/commands for same detection
+DETECTION_COOLDOWN = 0.6
+
 class ACSSGui:
     def __init__(self, root):
         self.root = root
@@ -120,8 +136,10 @@ class ACSSGui:
         self.yolo = None
         self.frame_lock = threading.Lock()
         self.latest_frame = None
+        self._tk_image_ref = None  # keep reference to PhotoImage
+        self._last_detection_time = 0.0
 
-        # Load YOLO model
+        # Load YOLO model (non-blocking try — if fails, detection won't start)
         if ULTRALYTICS_AVAILABLE:
             try:
                 self.logmsg("Loading YOLO model (may take a while)...")
@@ -129,6 +147,7 @@ class ACSSGui:
                 self.logmsg(f"YOLO model loaded: {YOLO_MODEL_PATH}")
             except Exception as ex:
                 self.logmsg("YOLO load failed: " + str(ex))
+                self.yolo = None
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -152,7 +171,7 @@ class ACSSGui:
         if serial is None:
             self.logmsg("pyserial not available.")
             return
-        if self.serial and self.serial.is_open:
+        if self.serial and getattr(self.serial, "is_open", False):
             self.logmsg("Serial already open.")
             return
         try:
@@ -162,25 +181,31 @@ class ACSSGui:
             t.start()
         except Exception as e:
             self.logmsg("Failed to open serial: " + str(e))
+            self.serial = None
 
     def close_serial(self):
         try:
-            if self.serial and self.serial.is_open:
+            if self.serial and getattr(self.serial, "is_open", False):
                 self.serial.close()
                 self.logmsg("Serial closed.")
         except Exception as e:
             self.logmsg("Error closing serial: " + str(e))
+        finally:
+            self.serial = None
 
     def send_cmd(self, text):
-        if not self.serial or not self.serial.is_open:
-            self.logmsg("Serial not open. Cannot send: " + text)
-            return
+        if not self.serial or not getattr(self.serial, "is_open", False):
+            # don't spam log for every detection when serial missing
+            return False
         try:
             with self.serial_lock:
                 self.serial.write((text + "\n").encode())
+            # short log only
             self.logmsg(f"TX -> {text}")
+            return True
         except Exception as e:
             self.logmsg("Serial write failed: " + str(e))
+            return False
 
     def send_sort(self, char):
         if char not in ('L', 'C', 'R'):
@@ -190,11 +215,21 @@ class ACSSGui:
         self.send_cmd(f"SORT,{char}")
 
     def serial_reader_thread(self):
-        while self.serial and self.serial.is_open and self.running:
+        # Filters noisy serial messages (e.g., IR or frequent telemetry)
+        noisy_prefixes = ('IR', 'AS:', 'STATUS', 'SENSOR', 'DBG')
+        while self.serial and getattr(self.serial, "is_open", False) and self.running:
             try:
                 line = self.serial.readline().decode(errors='ignore').strip()
-                if line:
-                    self.logmsg(f"RX <- {line}")
+                if not line:
+                    continue
+                # ignore noisy lines
+                if any(line.startswith(p) for p in noisy_prefixes) or line in ("IR", "ACK"):
+                    # optionally log ACK minimally
+                    if line == "ACK":
+                        self.logmsg("ACK from Arduino")
+                    # otherwise skip
+                    continue
+                self.logmsg(f"Serial <- {line}")
             except Exception as e:
                 self.logmsg("Serial reader exception: " + str(e))
                 time.sleep(0.1)
@@ -218,6 +253,8 @@ class ACSSGui:
             self.logmsg("Camera started.")
         except Exception as e:
             self.logmsg("Camera start failed: " + str(e))
+            self.picam2 = None
+            self.camera_running = False
 
     def stop_camera(self):
         if not self.camera_running:
@@ -237,25 +274,32 @@ class ACSSGui:
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()
+                # convert from BGRA -> BGR safely
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                 with self.frame_lock:
                     self.latest_frame = frame.copy()
                 display = cv2.resize(frame, CAM_PREVIEW_SIZE)
-                self.update_canvas_with_frame(display)
+                # schedule UI update on main thread
+                self.root.after(0, self._display_frame_on_canvas, display)
                 time.sleep(1/30)
             except Exception as e:
                 self.logmsg("Camera loop error: " + str(e))
                 time.sleep(0.2)
 
-    def update_canvas_with_frame(self, bgr_frame):
+    def _display_frame_on_canvas(self, bgr_frame):
         try:
             rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
             if PIL_AVAILABLE:
                 img = Image.fromarray(rgb)
                 imgtk = ImageTk.PhotoImage(img)
-                self.cam_canvas.imgtk = imgtk
+                self._tk_image_ref = imgtk
                 self.cam_canvas.create_image(0, 0, anchor='nw', image=imgtk)
+            else:
+                # fallback: show in OpenCV window (not ideal for Tkinter-only setups)
+                cv2.imshow("Camera Preview", bgr_frame)
+                cv2.waitKey(1)
         except Exception as e:
+            # don't spam log if UI update occasionally fails
             self.logmsg("Display frame error: " + str(e))
 
     # ---------- YOLO Detection ----------
@@ -266,11 +310,11 @@ class ACSSGui:
         if not self.camera_running:
             self.start_camera()
         if self.yolo is None:
-            self.logmsg("YOLO model not loaded.")
+            self.logmsg("YOLO model not loaded. Detection won't start.")
             return
-        if not (self.serial and self.serial.is_open):
-            self.logmsg("Open serial first for servo control.")
-            return
+        # allow detection even if serial isn't open
+        if not (self.serial and getattr(self.serial, "is_open", False)):
+            self.logmsg("Serial not open — detection will run without servo control.")
         self.detection_running = True
         self.detection_thread = threading.Thread(target=self.detection_loop, daemon=True)
         self.detection_thread.start()
@@ -280,14 +324,20 @@ class ACSSGui:
         self.detection_running = False
         self.logmsg("YOLO detection stopped.")
 
+    def _classname_to_sort(self, classname):
+        """Normalize classname and map to servo char."""
+        name = classname.lower()
+        if 'raw' in name:
+            return 'R'
+        if 'standard' in name:
+            return 'C'
+        # treat overcooked / rejected as rejected -> left
+        if 'overcook' in name or 'reject' in name or 'rejected' in name:
+            return 'L'
+        return 'C'
+
     def detection_loop(self):
         frame_counter = 0
-        color_map = {
-            'raw-copra': (0, 0, 255),          # Red for raw
-            'standard-copra': (0, 255, 0),     # Green for standard
-            'overcooked-copra': (0, 255, 255)  # Yellow for overcooked
-        }
-
         while self.detection_running:
             try:
                 frame = None
@@ -298,42 +348,54 @@ class ACSSGui:
                     time.sleep(0.1)
                     continue
 
+                # throttle inference to reduce CPU load
                 if frame_counter % 5 == 0:
+                    # call model
                     results = self.yolo(frame, verbose=False, imgsz=640, conf=0.25, max_det=1)
                     detections = results[0].boxes
 
                     if detections:
                         det = detections[0]
-                        classidx = int(det.cls.item())
-                        classname = self.yolo.names.get(classidx, 'unknown')
-                        conf = det.conf.item()
+                        try:
+                            classidx = int(det.cls.item())
+                            classname = self.yolo.names.get(classidx, 'unknown')
+                        except Exception:
+                            classname = getattr(det, 'cls', 'unknown')
+                        conf = float(det.conf.item() if hasattr(det, 'conf') else 0.0)
 
-                        if conf > 0.5:
-                            if classname == 'raw-copra':
-                                sort_cmd = 'R'
-                            elif classname == 'standard-copra':
-                                sort_cmd = 'C'
-                            elif classname == 'overcooked-copra':
-                                sort_cmd = 'L'
+                        now = time.time()
+                        if conf > 0.5 and (now - self._last_detection_time) >= DETECTION_COOLDOWN:
+                            self._last_detection_time = now
+
+                            sort_cmd = self._classname_to_sort(classname)
+
+                            # send to Arduino only if open
+                            if self.serial and getattr(self.serial, "is_open", False):
+                                sent = self.send_cmd(f"SORT,{sort_cmd}")
+                                if sent:
+                                    self.logmsg(f"Detected {classname} ({conf:.2f}) -> SORT,{sort_cmd}")
+                                else:
+                                    self.logmsg(f"Detected {classname} ({conf:.2f}) -> failed to send SORT,{sort_cmd}")
                             else:
-                                sort_cmd = 'C'
+                                # Don't spam logs too much; minimal log for detection without serial
+                                self.logmsg(f"Detected {classname} ({conf:.2f}) - serial closed, skipping SORT")
 
-                            self.send_sort(sort_cmd)
-                            self.logmsg(f"Detected {classname} ({conf:.2f}) -> SORT,{sort_cmd}")
-
+                            # annotate frame safely and schedule display
                             xyxy = det.xyxy.cpu().numpy().squeeze().astype(int)
-                            color = color_map.get(classname, (255, 255, 255))
+                            color = BOX_COLORS.get(classname.lower(), (0, 255, 0))
                             cv2.rectangle(frame, (xyxy[0], xyxy[1]), (xyxy[2], xyxy[3]), color, 2)
-                            cv2.putText(frame, f"{classname}: {int(conf*100)}%", 
-                                        (xyxy[0], xyxy[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                            cv2.putText(frame, f"{classname}: {int(conf*100)}%", (xyxy[0], xyxy[1]-10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
                             display = cv2.resize(frame, CAM_PREVIEW_SIZE)
-                            self.update_canvas_with_frame(display)
+                            # schedule on main thread
+                            self.root.after(0, self._display_frame_on_canvas, display)
 
                 frame_counter += 1
                 time.sleep(1/30)
 
             except Exception as e:
+                # keep detection alive on errors; log once per error occurrence
                 self.logmsg("Detection loop error: " + str(e))
                 time.sleep(0.2)
 
@@ -348,8 +410,13 @@ class ACSSGui:
         except Exception:
             pass
         try:
-            if self.serial and self.serial.is_open:
+            if self.serial and getattr(self.serial, "is_open", False):
                 self.serial.close()
+        except Exception:
+            pass
+        # Close any OpenCV windows if used
+        try:
+            cv2.destroyAllWindows()
         except Exception:
             pass
         self.root.destroy()
@@ -363,11 +430,12 @@ if __name__ == "__main__":
         try:
             app.start_camera()
             app.logmsg("Camera auto-started on launch.")
-            root.after(2000, lambda: app.start_detection())  # wait 2s before YOLO start
+            # delay YOLO start to allow camera warm-up
+            root.after(2000, lambda: app.start_detection())
         except Exception as e:
             app.logmsg("Auto-start failed: " + str(e))
 
-    # Delay auto-start slightly so UI fully loads
+    # delay auto-start slightly so UI fully loads
     root.after(1000, auto_start)
 
     try:

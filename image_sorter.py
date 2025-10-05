@@ -358,4 +358,22 @@ class ACSSGui:
 if __name__ == "__main__":
     root = tk.Tk()
     app = ACSSGui(root)
-    root.mainloop()
+
+    def auto_start():
+        try:
+            app.start_camera()
+            app.logmsg("Camera auto-started on launch.")
+            root.after(2000, lambda: app.start_detection())  # wait 2s before YOLO start
+        except Exception as e:
+            app.logmsg("Auto-start failed: " + str(e))
+
+    # Delay auto-start slightly so UI fully loads
+    root.after(1000, auto_start)
+
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        app.on_close()
+    except Exception as e:
+        print("Fatal error:", e)
+        app.on_close()

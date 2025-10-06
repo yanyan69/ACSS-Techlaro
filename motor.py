@@ -16,7 +16,7 @@ except Exception:
     print("⚠️ pyserial not available — install with: pip install pyserial")
 
 # ---------- USER SETTINGS ----------
-SERIAL_PORT = "/dev/ttyACM0"   # ← Change this to match your Arduino port (check using: ls /dev/ttyUSB* or /dev/ttyACM*)
+SERIAL_PORT = "/dev/ttyUSB0"   # ← Change this to match your Arduino port (check using: ls /dev/ttyUSB* or /dev/ttyACM*)
 SERIAL_BAUD = 9600
 # ----------------------------------
 

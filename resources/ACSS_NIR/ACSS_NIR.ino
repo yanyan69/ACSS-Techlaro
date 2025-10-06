@@ -78,6 +78,8 @@ void setup() {
 
 // === MOTOR CONTROL ===
 void motorForward(int speed) {
+  Serial.print("DEBUG: Motor starting at speed ");  // Added for verbose debugging
+  Serial.println(speed);
   digitalWrite(TB6612_AIN1, HIGH);
   digitalWrite(TB6612_AIN2, LOW);
   analogWrite(TB6612_PWMA, speed);
@@ -102,6 +104,10 @@ void loop() {
   if (Serial.available()) {
     String command = Serial.readStringUntil('\n');
     command.trim();  // Remove any whitespace
+    command.toUpperCase();  // Ensure uppercase for matching (added for robustness)
+
+    Serial.print("DEBUG: Raw command length: ");  // Added for verbose debugging
+    Serial.println(command.length());
 
     if (command.length() == 0) return;
 
@@ -127,12 +133,15 @@ void loop() {
 
     // === MOTOR COMMANDS ===
     else if (command == "MOTOR,ON") {
-      motorForward(200); // ~80% speed
+      motorForward(255); // Increased to max speed (255) for gear motor inertia
       Serial.println("ACK");
     }
     else if (command == "MOTOR,OFF") {
       motorStop();
       Serial.println("ACK");
+    }
+    else if (command.indexOf("MOTOR") != -1) {  // Added for debugging partial matches
+      Serial.println("DEBUG: Motor command detected but not exact match.");
     }
 
     // === REQ_AS: Get calibrated AS7263 values ===
@@ -162,7 +171,7 @@ void loop() {
       char cmd = command.charAt(0);
 
       if (cmd == 'M') { // Motor test
-        motorForward(200);
+        motorForward(255);  // Increased to max speed
         Serial.println("Motor running forward.");
         delay(2000);
         motorStop();

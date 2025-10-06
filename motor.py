@@ -73,8 +73,8 @@ class MotorControlGUI:
             if self.serial and self.serial.is_open:
                 self.logmsg("Serial already open.")
                 return
-            self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
-            time.sleep(2)  # Wait for Arduino reset
+            self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)  # Increased timeout for reliability
+            time.sleep(3)  # Increased wait for Arduino reset (some boards need more time)
             self.logmsg(f"✅ Opened serial {SERIAL_PORT} @ {SERIAL_BAUD}")
             threading.Thread(target=self.serial_reader, daemon=True).start()
         except Exception as e:
@@ -99,6 +99,7 @@ class MotorControlGUI:
                 self.serial.write(full_cmd)
                 self.serial.flush()
             self.logmsg(f"[TX] {text.strip().upper()}")
+            self.logmsg(f"[DEBUG] Sent bytes: {full_cmd}")  # Added for verbose debugging
         except Exception as e:
             self.logmsg(f"[ERR] Send failed: {e}")
 
@@ -110,6 +111,8 @@ class MotorControlGUI:
                 line = self.serial.readline().decode(errors='ignore').strip()
                 if line:
                     self.logmsg(f"[RX] {line}")
+                else:
+                    self.logmsg("[DEBUG] Read timeout - no data received yet")  # Added for verbose debugging (comment out if too spammy)
             except Exception as e:
                 self.logmsg(f"[Reader ERR] {e}")
                 time.sleep(0.2)

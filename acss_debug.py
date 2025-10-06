@@ -158,11 +158,20 @@ class ACSSGui:
     def logmsg(self, msg):
         ts = time.strftime("%H:%M:%S")
         full_msg = f"[{ts}] {msg}"
-        self.log.config(state='normal')
-        self.log.insert('end', full_msg + "\n")
-        self.log.see('end')
-        self.log.config(state='disabled')
         print(full_msg)
+
+        def _do_log():
+            if not hasattr(self, 'log') or not self.log.winfo_exists():
+                return
+            try:
+                self.log.config(state='normal')
+                self.log.insert('end', full_msg + "\n")
+                self.log.see('end')
+                self.log.config(state='disabled')
+            except tk.TclError:
+                pass  # Widget destroyed
+
+        self.root.after(0, _do_log)
 
     # ---------- Serial ----------
     def open_serial(self):
@@ -437,11 +446,14 @@ class ACSSGui:
                 self.picam2.stop()
             if self.serial and self.serial.is_open:
                 self.serial.close()
-            self.root.destroy()
             self.logmsg("Application closed safely.")
+            self.root.destroy()
         except Exception as e:
             print("Shutdown error:", e)
-            self.root.destroy()
+            try:
+                self.root.destroy()
+            except:
+                pass
 
 
 if __name__ == "__main__":

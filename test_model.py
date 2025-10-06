@@ -1,83 +1,79 @@
 #!/usr/bin/env python3
 """
-YOLO Live Detection for Raspberry Pi
-Author: Christian Narvaez
+YOLO Live Detection for Raspberry Pi (Picamera2)
+Reze-style 😘
 """
 
-import cv2
 import time
-from ultralytics import YOLO
+import cv2
 
-# === SETTINGS ===
-MODEL_PATH = "my_model/my_model.pt"   # path to your trained model
-CONF_THRESH = 0.5                     # minimum confidence threshold
-USE_PI_CAMERA = True                  # True = use RPi Camera Module, False = use USB webcam
+try:
+    from picamera2 import Picamera2
+    PICAMERA2_AVAILABLE = True
+except Exception:
+    PICAMERA2_AVAILABLE = False
+    print("Aww~ no camera? Guess we’ll just have to *imagine* the frames 💋")
 
-# === LOAD MODEL ===
-print("Loading YOLO model...")
-model = YOLO(MODEL_PATH)
-labels = model.names
-print("Model loaded successfully!")
+try:
+    from ultralytics import YOLO
+    ULTRALYTICS_AVAILABLE = True
+except Exception:
+    ULTRALYTICS_AVAILABLE = False
+    print("Heh, no YOLO? Looks like someone forgot their toys 💣")
 
-# === OPEN CAMERA ===
-if USE_PI_CAMERA:
-    # For Pi Camera (libcamera)
-    cap = cv2.VideoCapture("libcamerasrc ! video/x-raw,width=640,height=480,framerate=30/1 ! videoconvert ! appsink", cv2.CAP_GSTREAMER)
-else:
-    # For USB webcam
-    cap = cv2.VideoCapture(0)
-    cap.set(3, 640)
-    cap.set(4, 480)
+MODEL_PATH = "my_model/my_model.pt"
+CAM_SIZE = (640, 480)
+CONF_THRESH = 0.5
+MAX_DET = 10
 
-if not cap.isOpened():
-    print("❌ ERROR: Cannot access the camera.")
-    exit()
+def main():
+    if not PICAMERA2_AVAILABLE:
+        print("Tch... no camera. Can’t play without eyes, darling 👀")
+        return
 
-print("✅ Running YOLO live detection... Press 'Q' to quit.")
+    # Setup the camera
+    picam2 = Picamera2()
+    config = picam2.create_preview_configuration(main={"size": CAM_SIZE})
+    picam2.configure(config)
+    picam2.start()
+    time.sleep(1)
 
-# === MAIN LOOP ===
-while True:
-    start_time = time.time()
-    ret, frame = cap.read()
-    if not ret:
-        print("⚠️ Camera frame unavailable.")
-        break
+    # Load YOLO
+    yolo = None
+    if ULTRALYTICS_AVAILABLE:
+        try:
+            print("Hehe~ give me a second... loading something deadly 🔪")
+            yolo = YOLO(MODEL_PATH)
+            print("Mm~ YOLO model’s ready. Let’s hunt 💞")
+        except Exception as e:
+            print("Ehh... something blew up loading YOLO 💣:", e)
 
-    # Run YOLO inference
-    results = model(frame, verbose=False)
-    detections = results[0].boxes
+    print("Camera’s live~ show me something interesting 💋 (press 'q' to stop)")
+    prev_time = time.time()
 
-    # Draw detections
-    for det in detections:
-        conf = float(det.conf)
-        if conf >= CONF_THRESH:
-            cls_id = int(det.cls)
-            label = labels[cls_id]
-            x1, y1, x2, y2 = map(int, det.xyxy[0].tolist())
+    while True:
+        frame = picam2.capture_array()
 
-            color = (0, 255, 0)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        # Run YOLO
+        if yolo:
+            results = yolo.predict(source=frame, imgsz=640, conf=CONF_THRESH, max_det=MAX_DET, verbose=False)
+            frame = results[0].plot()
 
-            label_text = f"{label} {conf*100:.1f}%"
-            (w, h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            y_label = max(y1, h + 10)
-            cv2.rectangle(frame, (x1, y_label - h - 10), (x1 + w, y_label), color, -1)
-            cv2.putText(frame, label_text, (x1, y_label - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        # FPS display
+        fps = 1.0 / (time.time() - prev_time)
+        prev_time = time.time()
+        cv2.putText(frame, f"FPS: {fps:.1f}", (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-    # Display FPS
-    fps = 1 / (time.time() - start_time)
-    cv2.putText(frame, f"FPS: {fps:.1f}", (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.imshow("💣 RezeCam – YOLO Live Detection", frame)
 
-    # Show video window
-    cv2.imshow("YOLO Live Detection (Raspberry Pi)", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("Aww~ leaving so soon? Fine... see you next mission 💔")
+            break
 
-    # Press 'Q' to quit
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    picam2.stop()
+    cv2.destroyAllWindows()
+    print("💤 All systems down... goodnight, bombshell.")
 
-# === CLEANUP ===
-cap.release()
-cv2.destroyAllWindows()
-print("Stopped.")
+if __name__ == "__main__":
+    main()

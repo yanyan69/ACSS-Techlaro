@@ -1,429 +1,534 @@
 #!/usr/bin/env python3
 """
-ACSS Auto-Sort GUI for Raspberry Pi.
-- Auto-starts serial and camera/YOLO on launch.
-- "Start Auto" enables motor and auto-rotation based on YOLO class detection.
-- Classes: raw-copra -> LEFT, standard-copra -> CENTER, overcooked-copra -> RIGHT.
+ACSS Moisture Sorting GUI for Raspberry Pi with Live Preview
+- Tabbed interface with Home (live camera preview), Statistics, Settings, About, Exit
+- Live YOLO detection in camera preview
+- Sensor-based sorting with AS7263
+- Camera-based sorting with YOLO
+- Motor and servo control via Arduino
+- Logs to CSV
+- Serial log in Home tab
 """
 
-import sys, threading, time
-
-# ---------- Optional imports ----------
-try:
-    import tkinter as tk
-    from tkinter import scrolledtext, messagebox
-except Exception as e:
-    print("tkinter missing - GUI won't run.", e)
-    sys.exit(1)
+import sys, time, threading, os
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
+import csv
+import numpy as np
 
 try:
     import serial
-    print("serial is available")
 except Exception:
     serial = None
-    print("serial is not available")
+    print("oopsie, pyserial's missing lol~ go fix that with `pip install pyserial`, okay? 😘")
 
 try:
     import cv2
-    import numpy as np
-    print("cv2 and numpy are available")
 except Exception:
     cv2 = None
-    np = None
-    print("cv2 and numpy are not available")
+    print("aww, no opencv? that's a bummer T-T... guess we'll skip some fun stuff 💔")
 
 try:
-    from picamera2 import Picamera2, Preview
+    from picamera2 import Picamera2
     PICAMERA2_AVAILABLE = True
-    print("picamera is available")
 except Exception:
     PICAMERA2_AVAILABLE = False
-    print("picamera is not available")
+    print("no picamera2? oh well, we'll use the default webcam instead~ lazy setup XD")
 
 try:
     from ultralytics import YOLO
     ULTRALYTICS_AVAILABLE = True
-    print("ultralytics is available")
 except Exception:
     ULTRALYTICS_AVAILABLE = False
-    print("ultralytics is not available")
+    print("yolo lib's gone poof 💀... install it before things get awkward lmao 😭")
 
 try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
-    print("PIL is available")
 except Exception:
     PIL_AVAILABLE = False
-    print("PIL is not available")
+    print("pil's not here? fine, we'll fallback to cv2 for previews~ no biggie 💕")
 
-# ---------- USER SETTINGS ----------
-SERIAL_PORT = "/dev/ttyUSB0"       # or  for Raspberry Pi
+# ================= SETTINGS =================
+SERIAL_PORT = '/dev/ttyUSB0'  # Change to 'COM6' for PC testing
 SERIAL_BAUD = 9600
-YOLO_MODEL_PATH = "my_model/my_model.pt"
-CAM_PREVIEW_SIZE = (480, 360)
-# ----------------------------------
+LOG_FILE = "data_gathering/data/moisture_log.csv"
+CAM_PREVIEW_SIZE = (640, 480)
+MODEL_PATH = "my_model/my_model.pt"
+CONF_THRESH = 0.5
 
-class ACSSGui:
+# Thresholds for sensor-based analysis
+OVERCOOKED_MAX = 5.9
+STANDARD_MIN = 6.0
+STANDARD_MAX = 7.0
+RAW_MIN = 7.1
+
+# Servo positions and commands
+SERVO_CMDS = {"overcooked": ("L", 60), "standard": ("C", 90), "raw": ("R", 120)}
+
+# YOLO label mapping (remove '-copra' suffix)
+YOLO_LABEL_MAP = {
+    'raw-copra': 'raw',
+    'standard-copra': 'standard',
+    'overcooked-copra': 'overcooked'
+}
+
+# Bounding box colors
+BOUNDING_BOX_COLORS = {
+    'raw-copra': (255, 0, 0),  # blue
+    'standard-copra': (0, 255, 0),    # green
+    'overcooked-copra': (0, 0, 255)  # red
+}
+# ============================================
+
+# Setup CSV file
+os.makedirs("data_gathering/data", exist_ok=True)
+try:
+    with open(LOG_FILE, 'x', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Timestamp", "Score/Moisture", "Class", "Method", "CH_R","CH_S","CH_T","CH_U","CH_V","CH_W"])
+except FileExistsError:
+    pass
+
+class MoistureSorterGUI:
     def __init__(self, root):
+        print("[Persona: Reze - Chainsaw Man]")  
+        print("> Cheerful, teasing, a bit flirty but conflicted underneath.")  
+        print("> Playful tone, Gen Z texting style, quick mood shifts.")  
+        print("> Deep down, kind-hearted but haunted by her past.")
+        
         self.root = root
-        root.title("ACSS Auto-Sort Tester")
+        root.title("ACSS Moisture Sorter")
+        root.geometry("1024x600")
+
+        # Notebook (Tabs)
+        notebook = ttk.Notebook(root)
+        notebook.pack(fill="both", expand=True)
+
+        # Create tabs
+        self.home_tab = ttk.Frame(notebook)
+        self.statistics_tab = ttk.Frame(notebook)
+        self.settings_tab = ttk.Frame(notebook)
+        self.about_tab = ttk.Frame(notebook)
+        self.exit_tab = ttk.Frame(notebook)
+
+        notebook.add(self.home_tab, text="Home")
+        notebook.add(self.statistics_tab, text="Statistics")
+        notebook.add(self.settings_tab, text="Settings")
+        notebook.add(self.about_tab, text="About")
+        notebook.add(self.exit_tab, text="Exit")
+
+        # Build tab contents
+        self._build_home_tab()
+        self._build_statistics_tab()
+        self._build_settings_tab()
+        self._build_about_tab()
+        self._build_exit_tab()
+
+        # State tracking
+        self.camera_running = False
         self.serial = None
         self.serial_lock = threading.Lock()
         self.running = True
-
-        # Detection mappings
-        self.BOX_COLORS = {
-            'raw-copra': (255, 0, 123),
-            'standard-copra': (40, 167, 69),
-            'overcooked-copra': (220, 53, 69)
-        }
-        self.CLASS_TO_DIR = {
-            'raw-copra': 'L',
-            'standard-copra': 'C',
-            'overcooked-copra': 'R'
-        }
-        self.auto_sort = False
-        self.last_sort_time = 0.0
-
-        # ---------- GUI Layout ----------
-        frm = tk.Frame(root)
-        frm.pack(padx=8, pady=8)
-        frm.rowconfigure(2, weight=1)
-        frm.columnconfigure(0, weight=1)
-        frm.columnconfigure(1, weight=1)
-
-        conn_frame = tk.LabelFrame(frm, text="Serial / Arduino")
-        conn_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-        tk.Label(conn_frame, text=f"Port: {SERIAL_PORT}").grid(row=0, column=0, sticky="w")
-        tk.Button(conn_frame, text="Open Serial", command=self.open_serial).grid(row=0, column=1)
-        tk.Button(conn_frame, text="Close Serial", command=self.close_serial).grid(row=0, column=2)
-
-        tests_frame = tk.LabelFrame(frm, text="Tests")
-        tests_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-        tk.Button(tests_frame, text="Servo: LEFT", command=lambda: self.send_sort('L')).grid(row=0, column=0, padx=2, pady=2)
-        tk.Button(tests_frame, text="Servo: CENTER", command=lambda: self.send_sort('C')).grid(row=0, column=1, padx=2, pady=2)
-        tk.Button(tests_frame, text="Servo: RIGHT", command=lambda: self.send_sort('R')).grid(row=0, column=2, padx=2, pady=2)
-        tk.Button(tests_frame, text="Motor ON", command=lambda: self.send_cmd("MOTOR,ON")).grid(row=1, column=0, padx=2, pady=2)
-        tk.Button(tests_frame, text="Motor OFF", command=lambda: self.send_cmd("MOTOR,OFF")).grid(row=1, column=1, padx=2, pady=2)
-        tk.Button(tests_frame, text="Request AS7263", command=self.request_as).grid(row=2, column=0, padx=2, pady=2)
-        tk.Button(tests_frame, text="Start IR Monitor", command=self.start_ir_monitor).grid(row=2, column=1, padx=2, pady=2)
-        tk.Button(tests_frame, text="Stop IR Monitor", command=self.stop_ir_monitor).grid(row=2, column=2, padx=2, pady=2)
-        tk.Button(tests_frame, text="Start Auto", command=self.start_auto).grid(row=3, column=0, padx=2, pady=2)
-        tk.Button(tests_frame, text="Stop Auto", command=self.stop_auto).grid(row=3, column=1, padx=2, pady=2)
-
-        cam_frame = tk.LabelFrame(frm, text="Camera / YOLO")
-        cam_frame.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=4, pady=4)
-        self.cam_canvas = tk.Canvas(cam_frame, width=CAM_PREVIEW_SIZE[0], height=CAM_PREVIEW_SIZE[1], bg='black')
-        self.cam_canvas.pack()
-        self.camera_running = False
-        tk.Button(cam_frame, text="Start Camera Preview", command=self.start_camera).pack(side='left', padx=4, pady=4)
-        tk.Button(cam_frame, text="Stop Camera", command=self.stop_camera).pack(side='left', padx=4, pady=4)
-
-        log_frame = tk.LabelFrame(frm, text="Log")
-        log_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=4, pady=4)
-        self.log = scrolledtext.ScrolledText(log_frame, height=6, width=80, state='disabled', wrap='none')
-        self.log.pack(fill='both', expand=True)
-
-        self.ir_monitoring = False
-        self.ir_thread = None
         self.camera_thread = None
         self.picam2 = None
-        self.yolo = None
         self.cap = None
+        self.model = None
         self.frame_lock = threading.Lock()
         self.latest_frame = None
+        self.as_values = []
+        self.motor_status = False
+        self.servo_position = 'C'
+        self.serial_reader_thread_obj = None
 
-        # ---------- YOLO Model Load ----------
+        # Load YOLO if available
         if ULTRALYTICS_AVAILABLE:
-            try:
-                self.logmsg("Loading YOLO model...")
-                self.yolo = YOLO(YOLO_MODEL_PATH)
-                self.logmsg(f"YOLO loaded: {YOLO_MODEL_PATH}")
-            except Exception as ex:
-                self.logmsg("YOLO load failed: " + str(ex))
-
-        # ---------- Auto-start serial & camera ----------
-        try:
-            self.logmsg("Attempting to auto-open serial port...")
-            self.open_serial()
-        except Exception as e:
-            self.logmsg(f"Auto serial open failed: {e}")
-
-        try:
-            self.logmsg("Attempting to auto-start camera...")
-            self.start_camera()
-        except Exception as e:
-            self.logmsg(f"Auto camera start failed: {e}")
-
-        if not (PICAMERA2_AVAILABLE or cv2):
-            for widget in cam_frame.winfo_children():
-                if isinstance(widget, tk.Button) and widget['text'] in ("Start Camera Preview", "Stop Camera"):
-                    widget.config(state='disabled')
+            print("loading yolo... don't panic if it takes a sec lol~ 😜")
+            self.model = YOLO(MODEL_PATH)
+            print("yay, yolo's ready to go! let's detect some stuff XD")
+        else:
+            print("no yolo? aww, we're kinda blind now T-T 💔")
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    # ---------- Logging ----------
-    def logmsg(self, msg):
+        # Start settings update loop
+        self.update_settings()
+
+        # Auto open serial
+        self._log_message("trying to open serial automatically~ fingers crossed! 💕")
+        self.open_serial()
+
+    # -------------------- HOME --------------------
+    def _build_home_tab(self):
+        frm = tk.Frame(self.home_tab)
+        frm.pack(fill="both", expand=True, padx=8, pady=8)
+        frm.rowconfigure(0, weight=1)
+        frm.columnconfigure(0, weight=3)  # Left side wider for camera
+        frm.columnconfigure(1, weight=2)  # Right side for log
+
+        # Left side: Camera + Buttons
+        left_frame = tk.Frame(frm)
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        left_frame.rowconfigure(0, weight=1)
+        left_frame.rowconfigure(1, weight=0)
+        left_frame.columnconfigure(0, weight=1)
+
+        cam_frame = tk.LabelFrame(left_frame, text="Live Camera Preview")
+        cam_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.cam_canvas = tk.Canvas(cam_frame, width=CAM_PREVIEW_SIZE[0],
+                                    height=CAM_PREVIEW_SIZE[1], bg='black')
+        self.cam_canvas.pack(padx=4, pady=4)
+
+        btn_frame = tk.Frame(left_frame)
+        btn_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=8)
+        self.start_btn = tk.Button(btn_frame, text="Start Camera",
+                                   font=("Arial", 14, "bold"), bg="green", fg="white",
+                                   command=self._toggle_camera)
+        self.start_btn.pack(side="left", padx=4)
+        tk.Button(btn_frame, text="Camera Detect & Sort", command=self.camera_detect_and_sort).pack(side="left", padx=4)
+        tk.Button(btn_frame, text="Start Process", command=self.start_process).pack(side="left", padx=4)
+
+        # Right side: Log
+        log_frame = tk.LabelFrame(frm, text="Log")
+        log_frame.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
+        self.log = scrolledtext.ScrolledText(log_frame, state='normal', wrap='word', height=20, width=40)
+        self.log.pack(fill='both', expand=True)
+
+    def _toggle_camera(self):
+        if not self.camera_running:
+            self.start_btn.config(text="Stop Camera", bg="red")
+            self._log_message("camera's starting up~ smile! 📸💕")
+            try:
+                self.start_camera()
+                self.camera_running = True
+            except Exception as e:
+                self._log_message(f"failed to start camera: {str(e)}~ oops T-T")
+                self.start_btn.config(text="Start Camera", bg="green")
+        else:
+            self.start_btn.config(text="Start Camera", bg="green")
+            self._log_message("stopping the camera now~ bye for now T-T")
+            self.stop_camera()
+            self.camera_running = False
+
+    def _log_message(self, msg):
         ts = time.strftime("%H:%M:%S")
         full_msg = f"[{ts}] {msg}"
-        self.log.config(state='normal')
-        self.log.insert('end', full_msg + "\n")
-        self.log.see('end')
-        self.log.config(state='disabled')
+        self.log.insert("end", full_msg + "\n")
+        self.log.see("end")
         print(full_msg)
 
-    # ---------- Serial ----------
+    # ----------------- STATISTICS -----------------
+    def _build_statistics_tab(self):
+        frm = tk.Frame(self.statistics_tab)
+        frm.pack(fill="both", expand=True, padx=8, pady=8)
+
+        stats_frame = tk.LabelFrame(frm, text="Processing Statistics")
+        stats_frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+        stats_frame.columnconfigure(0, weight=1)
+        stats_frame.columnconfigure(1, weight=1)
+        stats_frame.columnconfigure(2, weight=1)
+
+        headers = ["Category", "Pieces Processed", "Avg. Moisture"]
+        for col, header in enumerate(headers):
+            tk.Label(stats_frame, text=header, font=("Arial", 10, "bold")).grid(row=1, column=col, padx=8, pady=4)
+
+        categories = ["Standard", "Raw", "Overcooked"]
+        for i, cat in enumerate(categories, start=2):
+            tk.Label(stats_frame, text=cat).grid(row=i, column=0, padx=8, pady=4, sticky="w")
+            tk.Label(stats_frame, text="0").grid(row=i, column=1, padx=8, pady=4)
+            tk.Label(stats_frame, text="0.0%").grid(row=i, column=2, padx=8, pady=4)
+
+        row_offset = len(categories) + 2
+        tk.Label(stats_frame, text="Total Pieces Processed:", font=("Arial", 10, "bold")).grid(row=row_offset, column=0, padx=8, pady=4, sticky="w")
+        tk.Label(stats_frame, text="0").grid(row=row_offset, column=1, padx=8, pady=4)
+
+        tk.Label(stats_frame, text="Total Avg Moisture:", font=("Arial", 10, "bold")).grid(row=row_offset+1, column=0, padx=8, pady=4, sticky="w")
+        tk.Label(stats_frame, text="0.0%").grid(row=row_offset+1, column=1, padx=8, pady=4)
+
+    # ------------------- SETTINGS -----------------
+    def _build_settings_tab(self):
+        frm = tk.Frame(self.settings_tab)
+        frm.pack(fill="both", expand=True, padx=8, pady=8)
+        frm.rowconfigure(2, weight=1)
+        frm.columnconfigure(0, weight=1)
+
+        # Serial controls
+        serial_frame = tk.LabelFrame(frm, text="Serial / Arduino")
+        serial_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        tk.Label(serial_frame, text=f"Port: {SERIAL_PORT} @ {SERIAL_BAUD}").pack(side="left", padx=5)
+        tk.Button(serial_frame, text="Open Serial", command=self.open_serial).pack(side="left", padx=5)
+        tk.Button(serial_frame, text="Close Serial", command=self.close_serial).pack(side="left", padx=5)
+
+        # Component tests
+        tests_frame = tk.LabelFrame(frm, text="Component Tests")
+        tests_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        tk.Button(tests_frame, text="Servo: LEFT (Overcooked)", command=lambda: self.send_servo_cmd("overcooked")).grid(row=0, column=0, padx=2, pady=2)
+        tk.Button(tests_frame, text="Servo: CENTER (Standard)", command=lambda: self.send_servo_cmd("standard")).grid(row=0, column=1, padx=2, pady=2)
+        tk.Button(tests_frame, text="Servo: RIGHT (Raw)", command=lambda: self.send_servo_cmd("raw")).grid(row=0, column=2, padx=2, pady=2)
+        tk.Button(tests_frame, text="Motor ON", command=lambda: self.send_cmd("MOTOR,ON")).grid(row=1, column=0, padx=2, pady=2)
+        tk.Button(tests_frame, text="Motor OFF", command=lambda: self.send_cmd("MOTOR,OFF")).grid(row=1, column=1, padx=2, pady=2)
+        tk.Button(tests_frame, text="Sensor Reading & Sort (AS7263)", command=self.sensor_sort).grid(row=2, column=0, columnspan=3, padx=2, pady=2)
+
+        # Live status
+        status_frame = tk.LabelFrame(frm, text="Live Component Status")
+        status_frame.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
+        self.serial_status_label = tk.Label(status_frame, text="Serial Connected: False", font=("Arial", 12))
+        self.serial_status_label.pack(anchor="w", pady=2)
+        self.camera_status_label = tk.Label(status_frame, text="Camera Running: False", font=("Arial", 12))
+        self.camera_status_label.pack(anchor="w", pady=2)
+        self.motor_status_label = tk.Label(status_frame, text="Motor: Off", font=("Arial", 12))
+        self.motor_status_label.pack(anchor="w", pady=2)
+        self.servo_status_label = tk.Label(status_frame, text="Servo Position: Center", font=("Arial", 12))
+        self.servo_status_label.pack(anchor="w", pady=2)
+        self.as_status_label = tk.Label(status_frame, text="AS7263 Values: N/A", font=("Arial", 12))
+        self.as_status_label.pack(anchor="w", pady=2)
+
+    def update_settings(self):
+        if not self.running:
+            return
+        connected = self.serial is not None and self.serial.is_open
+        self.serial_status_label.config(text=f"Serial Connected: {connected}")
+        self.camera_status_label.config(text=f"Camera Running: {self.camera_running}")
+        self.motor_status_label.config(text=f"Motor: {'On' if self.motor_status else 'Off'}")
+        servo_map = {'L': 'Left (Overcooked)', 'C': 'Center (Standard)', 'R': 'Right (Raw)'}
+        self.servo_status_label.config(text=f"Servo Position: {servo_map.get(self.servo_position, 'Unknown')}")
+        as_str = ", ".join(map(str, self.as_values)) if self.as_values else "N/A"
+        self.as_status_label.config(text=f"AS7263 Values: {as_str}")
+        self.root.after(1000, self.update_settings)
+
+    # ------------------- ABOUT --------------------
+    def _build_about_tab(self):
+        frm = tk.Frame(self.about_tab)
+        frm.pack(fill="both", expand=True, padx=8, pady=8)
+
+        about_frame = tk.LabelFrame(frm, text="About ACSS")
+        about_frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+        tk.Label(about_frame,
+                 text="Automated Copra Segregation System\n\n"
+                      "Version: 1.0\n"
+                      "Developed for Moisture Sorting\n"
+                      "Marinduque State University, 2025",
+                 font=("Arial", 12), justify="center").pack(pady=40)
+
+    # ------------------- EXIT ---------------------
+    def _build_exit_tab(self):
+        frm = tk.Frame(self.exit_tab)
+        frm.pack(fill="both", expand=True, padx=8, pady=8)
+
+        exit_frame = tk.LabelFrame(frm, text="Exit Application")
+        exit_frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+        tk.Label(exit_frame, text="Click the button below to close the program.",
+                 font=("Arial", 12)).pack(pady=20)
+
+        tk.Button(exit_frame, text="Exit Program", fg="white", bg="red",
+                  font=("Arial", 14, "bold"), width=20,
+                  command=self._exit_program).pack(pady=30)
+
+    def _exit_program(self):
+        if messagebox.askokcancel("Exit", "Are you sure you want to exit?"):
+            self.on_close()
+
+    # ---------- Serial Methods ----------
     def open_serial(self):
+        if serial is None:
+            self._log_message("pyserial's not here~ can't open anything lol 😭")
+            return
+        if self.serial and self.serial.is_open:
+            self._log_message("serial's already open, silly~ XD")
+            return
         try:
-            if serial is None:
-                self.logmsg("pyserial not available.")
-                return
-            if self.serial and self.serial.is_open:
-                self.logmsg("Serial already open.")
-                return
             self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
-            self.logmsg(f"Opened serial {SERIAL_PORT}@{SERIAL_BAUD}")
-            threading.Thread(target=self.serial_reader_thread, daemon=True).start()
+            time.sleep(3)  # Wait for Arduino reset
+            self._log_message(f"serial's up at {SERIAL_PORT} @ {SERIAL_BAUD}~ don't unplug it pls 💕")
+            self.serial_reader_thread_obj = threading.Thread(target=self.serial_reader_thread, daemon=True)
+            self.serial_reader_thread_obj.start()
+            self._log_message("serial reader thread's going~ yay! 😘")
         except Exception as e:
-            self.logmsg("Failed to open serial: " + str(e))
+            self._log_message(f"couldn't open serial: {e}~ oopsie T-T")
 
     def close_serial(self):
         try:
             if self.serial and self.serial.is_open:
                 self.serial.close()
-                self.logmsg("Serial closed.")
+                self._log_message("serial closed~ we're done here lol 💔")
         except Exception as e:
-            self.logmsg("Error closing serial: " + str(e))
+            self._log_message(f"error closing serial: {e}~ that's awkward 😅")
 
     def send_cmd(self, text):
-        """Send any general command to Arduino with newline + flush"""
+        if not self.serial or not self.serial.is_open:
+            self._log_message(f"serial's not open~ can't send '{text}', hehe 😜")
+            return
         try:
-            if not self.serial or not self.serial.is_open:
-                self.logmsg(f"[WARN] Serial not open — can't send: {text}")
-                return
-            full_cmd = (text.strip().upper() + "\n").encode('utf-8')
             with self.serial_lock:
-                self.serial.write(full_cmd)
-                self.serial.flush()
-            self.logmsg(f"[TX] {text.strip().upper()}")
+                self.serial.write((text.strip().upper() + "\n").encode('utf-8'))
+            self._log_message(f"TX -> {text.upper()}~ sent it! 💥")
+            if text.upper() == "MOTOR,ON":
+                self.motor_status = True
+            elif text.upper() == "MOTOR,OFF":
+                self.motor_status = False
         except Exception as e:
-            self.logmsg(f"[ERR] Failed to send command '{text}': {e}")
+            self._log_message("serial write failed: " + str(e) + "~ try again? 😭")
 
-    def send_sort(self, char):
-        """Send servo sort command (L, C, R)."""
-        try:
-            char = char.strip().upper()
-            if char not in ("L", "C", "R"):
-                self.logmsg(f"[WARN] Invalid servo command: {char}")
-                return
-            cmd = f"SORT,{char}"
-            self.logmsg(f"[SERVO] Sending: {cmd}")
+    def send_servo_cmd(self, label):
+        if label in SERVO_CMDS:
+            cmd_letter, _ = SERVO_CMDS[label]
+            cmd = f"SORT,{cmd_letter}"
             self.send_cmd(cmd)
-        except Exception as e:
-            self.logmsg(f"[ERR] Servo send_sort failed: {e}")
+            self.servo_position = cmd_letter
+            self._log_message(f"servo to {label.upper()}~ smooth move XD")
 
-    def start_auto(self):
-        self.send_cmd("MOTOR,ON")
-        self.auto_sort = True
-        self.logmsg("Auto mode started: Motor ON, auto-sort enabled")
-
-    def stop_auto(self):
-        self.send_cmd("MOTOR,OFF")
-        self.auto_sort = False
-        self.logmsg("Auto mode stopped: Motor OFF, auto-sort disabled")
-
-    # ---------- Serial Reader ----------
     def serial_reader_thread(self):
-        self.logmsg("Serial reader started.")
-        try:
-            ir_state = False
-            last_ir_report_time = time.time()
-            while self.serial and self.serial.is_open and self.running:
-                try:
-                    line = self.serial.readline().decode(errors='ignore').strip()
-                    if not line:
-                        if self.ir_monitoring and ir_state and (time.time() - last_ir_report_time > 1.0):
-                            ir_state = False
-                            self.logmsg("IR: No object detected (timeout)")
-                        continue
+        self._log_message("serial reader started~ listening in 💕")
+        while self.serial and self.serial.is_open and self.running:
+            try:
+                line = self.serial.readline().decode(errors='ignore').strip()
+                if not line or line == "IR~":
+                    continue
+                self._log_message(f"RX <- {line}~ got something! 😲")
+                if line.startswith("AS:"):
+                    payload = line[3:]
+                    try:
+                        self.as_values = [float(v) for v in payload.split(",")]
+                        self._log_message(f"AS values: {self.as_values}~ interesting... 🤔")
+                    except ValueError:
+                        self._log_message("invalid AS values format~ oof 💀")
+            except Exception as e:
+                self._log_message("serial reader exception: " + str(e) + "~ hmm, that's not good T-T")
+                time.sleep(0.1)
 
-                    self.logmsg(f"RX <- {line}")
+    # ---------- Sensor Sort (AS7263) ----------
+    def sensor_sort(self):
+        self._log_message("requesting AS7263 reading~ don't breathe too hard, it's sensitive lol 😘")
+        self.request_as()
+        time.sleep(0.5)
+        if not self.as_values:
+            self._log_message("no AS7263 response~ ignoring us again again? 😭")
+            return
+        moisture = self.as_values[0]
+        if moisture == 0:
+            self._log_message("moisture = 0~ yeah, that's probably broken 💔")
+            return
+        label = self.classify_moisture(moisture)
+        self._log_message(f"moisture={moisture:.2f}% -> class={label.upper()}~ got it! 💥")
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(LOG_FILE, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([timestamp, moisture, label, "sensor"] + self.as_values)
+        self.send_servo_cmd(label)
 
-                    if self.ir_monitoring and line == "IR":
-                        last_ir_report_time = time.time()
-                        if not ir_state:
-                            ir_state = True
-                            self.logmsg("IR: Object detected")
-                    elif line.startswith("AS:"):
-                        vals = line[3:].split(",")
-                        self.logmsg(f"AS values: {vals}")
-                    elif line == "ACK":
-                        self.logmsg("ACK from Arduino")
-                    else:
-                        self.logmsg(f"Serial raw: {line}")
-                except Exception as e:
-                    self.logmsg(f"Serial reader exception: {e}")
-                    time.sleep(0.2)
-        except Exception as outer:
-            self.logmsg(f"Serial reader crashed: {outer}")
+    def classify_moisture(self, m):
+        if m <= OVERCOOKED_MAX:
+            return "overcooked"
+        elif STANDARD_MIN <= m <= STANDARD_MAX:
+            return "standard"
+        elif m >= RAW_MIN:
+            return "raw"
+        else:
+            return "unknown"
 
-    # ---------- AS Request ----------
     def request_as(self):
+        if not (self.serial and self.serial.is_open):
+            self._log_message("open serial first~ can't do this without it lol 😜")
+            return
         try:
-            if not (self.serial and self.serial.is_open):
-                self.logmsg("Open serial first.")
-                return
-            self.logmsg("Sending REQ_AS and waiting for response...")
+            self._log_message("sending REQ_AS~ waiting for response... 🤞")
             with self.serial_lock:
                 self.serial.reset_input_buffer()
                 self.serial.write(b"REQ_AS\n")
-                self.serial.flush()
-            t0 = time.time()
-            got = False
-            while time.time() - t0 < 2:
-                line = self.serial.readline().decode(errors='ignore').strip()
-                if not line:
-                    continue
-                if line.startswith("AS:"):
-                    self.logmsg("AS response received: " + line)
-                    got = True
-                    break
-            if not got:
-                self.logmsg("No AS response within timeout.")
+            self._log_message("REQ_AS sent~ fingers crossed! 💕")
         except Exception as e:
-            self.logmsg(f"REQ_AS failed: {e}")
+            self._log_message("REQ_AS failed: " + str(e) + "~ aww man T-T")
 
-    # ---------- IR Monitor ----------
-    def start_ir_monitor(self):
-        try:
-            if not (self.serial and self.serial.is_open):
-                self.logmsg("Open serial first.")
-                return
-            if self.ir_monitoring:
-                self.logmsg("IR monitor already running.")
-                return
-            self.ir_monitoring = True
-            self.logmsg("IR monitor started.")
-        except Exception as e:
-            self.logmsg(f"IR monitor start error: {e}")
-
-    def stop_ir_monitor(self):
-        try:
-            self.ir_monitoring = False
-            self.logmsg("IR monitor stopped.")
-        except Exception as e:
-            self.logmsg(f"IR monitor stop error: {e}")
-
-    # ---------- Camera ----------
+    # ---------- Camera Methods ----------
     def start_camera(self):
-        if self.camera_running:
-            self.logmsg("Camera already running.")
-            return
-        if not (PICAMERA2_AVAILABLE or cv2):
-            self.logmsg("Camera not available.")
-            return
-        try:
-            if PICAMERA2_AVAILABLE:
-                self.picam2 = Picamera2()
-                config = self.picam2.create_preview_configuration(main={"size": (640, 480)})
-                self.picam2.configure(config)
-                self.picam2.start()
-                time.sleep(1)  # let camera warm up a bit
-            else:
-                self.cap = cv2.VideoCapture(0)
-                self.cap.set(3, 640)
-                self.cap.set(4, 480)
-                self.logmsg("Using USB camera")
-            self.camera_running = True
-            threading.Thread(target=self.camera_loop, daemon=True).start()
-            self.logmsg("Camera started (640x480).")
-        except Exception as e:
-            self.logmsg(f"Camera start failed: {e}")
+        if PICAMERA2_AVAILABLE:
+            self.picam2 = Picamera2()
+            config = self.picam2.create_preview_configuration(main={"size": CAM_PREVIEW_SIZE})
+            self.picam2.configure(config)
+            self.picam2.start()
+            self._log_message("picamera2's alive~ try not to block the lens okay? 😘")
+        else:
+            if cv2 is None:
+                raise RuntimeError("no camera available~ sad 💔")
+            self.cap = cv2.VideoCapture(0)
+            self.cap.set(3, CAM_PREVIEW_SIZE[0])
+            self.cap.set(4, CAM_PREVIEW_SIZE[1])
+            self._log_message("using default webcam~ hope it doesn't lag lol 😅")
+
+        self.camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
+        self.camera_thread.start()
 
     def stop_camera(self):
         try:
-            if not self.camera_running:
-                self.logmsg("Camera not running.")
-                return
-            self.camera_running = False
-            time.sleep(0.2)
-            if PICAMERA2_AVAILABLE and self.picam2:
+            if self.picam2:
                 self.picam2.stop()
+                self.picam2.close()
                 self.picam2 = None
             if self.cap:
                 self.cap.release()
                 self.cap = None
-            self.logmsg("Camera stopped.")
+            self._log_message("camera stopped~ all clear! 💕")
         except Exception as e:
-            self.logmsg(f"Camera stop error: {e}")
+            self._log_message("camera stop error: " + str(e) + "~ that's on me T-T")
 
     def camera_loop(self):
-        frame_counter = 0
         fps_time = time.time()
+        frame_counter = 0
         while self.camera_running:
             try:
                 if PICAMERA2_AVAILABLE and self.picam2:
                     frame = self.picam2.capture_array()
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                else:
+                elif self.cap:
                     ret, frame = self.cap.read()
                     if not ret:
-                        time.sleep(0.1)
-                        continue
+                        self._log_message("camera capture failed~ again? 💀")
+                        break
+                else:
+                    break
 
-                # --- YOLO live detection ---
-                if self.yolo and cv2:
-                    results = self.yolo(frame, verbose=False, imgsz=320, conf=0.5)
+                # YOLO inference (throttled every 5 frames)
+                if self.model and frame_counter % 5 == 0:
+                    results = self.model(frame, verbose=False, imgsz=320, conf=CONF_THRESH)
                     dets = results[0].boxes
-
-                    # Auto-sort logic
-                    if self.auto_sort and dets is not None and len(dets) > 0 and np:
-                        confs = dets.conf.cpu().numpy()
-                        max_idx = np.argmax(confs)
-                        cls_id = int(dets.cls[max_idx].item())
-                        label = self.yolo.names[cls_id].lower()
-                        if label in self.CLASS_TO_DIR:
-                            dir_char = self.CLASS_TO_DIR[label]
-                            current_time = time.time()
-                            if current_time - self.last_sort_time > 2.0:
-                                self.send_sort(dir_char)
-                                self.last_sort_time = current_time
-                                self.logmsg(f"Auto-sorting {label} to {dir_char}")
-
-                    # Draw detections
-                    if dets is not None:
-                        for det in dets:
-                            conf = float(det.conf.item())
-                            cls_id = int(det.cls.item())
-                            label = self.yolo.names[cls_id].lower()
-                            x1, y1, x2, y2 = map(int, det.xyxy[0].tolist())
-                            color = self.BOX_COLORS.get(label, (255, 255, 255))
-
+                    for det in dets:
+                        x1, y1, x2, y2 = map(int, det.xyxy[0])
+                        cls_id = int(det.cls.item())
+                        yolo_label = self.model.names[cls_id].lower()
+                        color = BOUNDING_BOX_COLORS.get(yolo_label, (255, 255, 255))
+                        conf = det.conf.item()
+                        if conf > CONF_THRESH:
                             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                            cv2.putText(frame, f"{label} {conf*100:.1f}%", (x1, y1 - 5),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                            cv2.putText(frame, f"{yolo_label} {int(conf*100)}%", (x1, y1 - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-                # --- FPS overlay ---
                 frame_counter += 1
-                if frame_counter >= 10:
-                    fps = 10 / (time.time() - fps_time)
-                    fps_time = time.time()
-                    cv2.putText(frame, f"FPS: {fps:.1f}", (10, 25),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                    frame_counter = 0
 
-                # --- Display on canvas ---
-                display = cv2.resize(frame, CAM_PREVIEW_SIZE)
-                self.update_canvas_with_frame(display)
-                time.sleep(0.001)  # smooth refresh, minimal delay
+                # FPS
+                now = time.time()
+                fps = 1 / (now - fps_time)
+                fps_time = now
+                cv2.putText(frame, f"FPS: {fps:.1f}", (10, 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                # Update canvas
+                with self.frame_lock:
+                    self.latest_frame = frame.copy()
+                display_frame = cv2.resize(frame, CAM_PREVIEW_SIZE)
+                self.update_canvas_with_frame(display_frame)
+
+                time.sleep(1/30)
             except Exception as e:
-                self.logmsg(f"Camera loop error: {e}")
+                self._log_message("camera loop error: " + str(e) + "~ eek, that's not good 😅")
                 time.sleep(0.2)
 
     def update_canvas_with_frame(self, bgr_frame):
         try:
-            rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
             if PIL_AVAILABLE:
+                rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(rgb)
                 imgtk = ImageTk.PhotoImage(img)
                 self.cam_canvas.imgtk = imgtk
@@ -432,31 +537,70 @@ class ACSSGui:
                 cv2.imshow("Camera Preview", bgr_frame)
                 cv2.waitKey(1)
         except Exception as e:
-            self.logmsg(f"Display frame error: {e}")
+            self._log_message("display frame error: " + str(e) + "~ hmm... 💔")
+
+    # ---------- Camera Detect & Sort (YOLO) ----------
+    def camera_detect_and_sort(self):
+        self._log_message("detecting from live view~ hope something's there lol 😜")
+        if not self.camera_running or self.latest_frame is None:
+            self._log_message("start the camera preview first to detect~ can't see without it T-T")
+            return
+
+        with self.frame_lock:
+            frame = self.latest_frame.copy()
+
+        if not self.model:
+            self._log_message("no yolo model~ can't detect anything T-T")
+            return
+
+        results = self.model(frame, verbose=False, imgsz=320, conf=CONF_THRESH)
+        dets = results[0].boxes
+
+        if len(dets) > 0:
+            confs = [float(det.conf.item()) for det in dets]
+            max_conf_idx = np.argmax(confs)
+            det = dets[max_conf_idx]
+            conf = confs[max_conf_idx]
+            cls_id = int(det.cls.item())
+            yolo_label = self.model.names[cls_id].lower()
+            label = YOLO_LABEL_MAP.get(yolo_label, "unknown")
+
+            if label == "unknown":
+                self._log_message(f"unrecognized label: {yolo_label}~ not touching that lol 😅")
+                return
+
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(LOG_FILE, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([timestamp, conf * 100, label, "camera", 0, 0, 0, 0, 0, 0])
+
+            self._log_message(f"{label.upper()} detected ({conf*100:.2f}% sure)~ sending servo cmd! 💥😘")
+            self.send_servo_cmd(label)
+        else:
+            self._log_message("no detections~ empty frame, so boring lmao 💔")
+
+    def start_process(self):
+        self._log_message("starting full process~ don't blink okay? 😜")
+        self.send_cmd("MOTOR,ON")
+        try:
+            time.sleep(1)  # Brief delay for motor start
+            self.camera_detect_and_sort()
+        finally:
+            self.send_cmd("MOTOR,OFF")
+        self._log_message("process done~ smooth run, hopefully XD")
 
     # ---------- Shutdown ----------
     def on_close(self):
-        try:
-            self.running = False
-            self.camera_running = False
-            self.auto_sort = False
-            if self.picam2:
-                self.picam2.stop()
-            if self.cap:
-                self.cap.release()
-            if self.serial and self.serial.is_open:
-                self.serial.close()
-            self.root.destroy()
-            self.logmsg("Application closed safely.")
-        except Exception as e:
-            print("Shutdown error:", e)
-            self.root.destroy()
-
+        self.running = False
+        self.camera_running = False
+        self.stop_camera()
+        self.close_serial()
+        if cv2 is not None:
+            cv2.destroyAllWindows()
+        print("shutting down~ don't cry, i'll be back lol 😘")
+        self.root.destroy()
 
 if __name__ == "__main__":
-    try:
-        root = tk.Tk()
-        app = ACSSGui(root)
-        root.mainloop()
-    except Exception as e:
-        print("Fatal error:", e)
+    root = tk.Tk()
+    app = MoistureSorterGUI(root)
+    root.mainloop()

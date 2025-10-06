@@ -97,6 +97,8 @@ class ACSSGui:
         tk.Button(tests_frame, text="Request AS7263", command=self.request_as).grid(row=2, column=0, padx=2, pady=2)
         tk.Button(tests_frame, text="Start IR Monitor", command=self.start_ir_monitor).grid(row=2, column=1, padx=2, pady=2)
         tk.Button(tests_frame, text="Stop IR Monitor", command=self.stop_ir_monitor).grid(row=2, column=2, padx=2, pady=2)
+        tk.Button(tests_frame, text="Start Process", command=self.start_process).grid(row=3, column=0, padx=2, pady=2)
+        tk.Button(tests_frame, text="Stop Process", command=self.stop_process).grid(row=3, column=1, padx=2, pady=2)
 
         cam_frame = tk.LabelFrame(frm, text="Camera / YOLO")
         cam_frame.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=4, pady=4)
@@ -118,6 +120,9 @@ class ACSSGui:
         self.yolo = None
         self.frame_lock = threading.Lock()
         self.latest_frame = None
+        self.process_running = False
+        self.sort_cooldown = 0
+        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
 
         # ---------- YOLO Model Load ----------
         if ULTRALYTICS_AVAILABLE:
@@ -208,6 +213,36 @@ class ACSSGui:
             self.send_cmd(cmd)
         except Exception as e:
             self.logmsg(f"[ERR] Servo send_sort failed: {e}")
+
+    # ---------- Process Control ----------
+    def start_process(self):
+        try:
+            if not (self.serial and self.serial.is_open):
+                self.logmsg("Open serial first.")
+                return
+            if not self.yolo:
+                self.logmsg("YOLO model not loaded.")
+                return
+            if self.process_running:
+                self.logmsg("Process already running.")
+                return
+            self.send_cmd("MOTOR,ON")
+            self.process_running = True
+            self.sort_cooldown = time.time()
+            self.logmsg("Process started: Motor ON, detection active.")
+        except Exception as e:
+            self.logmsg(f"Start process error: {e}")
+
+    def stop_process(self):
+        try:
+            if not self.process_running:
+                self.logmsg("Process not running.")
+                return
+            self.send_cmd("MOTOR,OFF")
+            self.process_running = False
+            self.logmsg("Process stopped: Motor OFF, detection inactive.")
+        except Exception as e:
+            self.logmsg(f"Stop process error: {e}")
 
     # ---------- Serial Reader ----------
     def serial_reader_thread(self):
@@ -337,6 +372,7 @@ class ACSSGui:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
                 # --- YOLO live detection ---
+                results = None
                 if self.yolo:
                     results = self.yolo.predict(
                         source=frame,
@@ -346,6 +382,19 @@ class ACSSGui:
                         verbose=False
                     )
                     frame = results[0].plot()
+
+                    # --- Integrated Process Detection ---
+                    current_time = time.time()
+                    if self.process_running and results[0].boxes is not None and len(results[0].boxes) > 0 and current_time > self.sort_cooldown:
+                        cls_tensor = results[0].boxes.cls
+                        conf_tensor = results[0].boxes.conf
+                        max_idx = conf_tensor.argmax().item()
+                        cls = int(cls_tensor[max_idx].item())
+                        conf = conf_tensor[max_idx].item()
+                        sort_char = self.class_to_sort.get(cls, 'C')
+                        self.send_sort(sort_char)
+                        self.logmsg(f"Detected class {cls} conf {conf:.2f}, sorting {sort_char}")
+                        self.sort_cooldown = current_time + 2.0  # 2-second cooldown to avoid multiple sorts per object
 
                 # --- FPS overlay ---
                 frame_counter += 1
@@ -382,6 +431,7 @@ class ACSSGui:
     def on_close(self):
         try:
             self.running = False
+            self.process_running = False
             self.camera_running = False
             if self.picam2:
                 self.picam2.stop()

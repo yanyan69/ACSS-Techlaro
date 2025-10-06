@@ -60,9 +60,9 @@ except Exception:
     print("PIL is not available")
 
 # ---------- USER SETTINGS ----------
-SERIAL_PORT = "COM6"       # or /dev/ttyUSB0 for Raspberry Pi
+SERIAL_PORT = "/dev/ttyUSB0"       # or  for Raspberry Pi
 SERIAL_BAUD = 9600
-YOLO_MODEL_PATH = "my_model/train/weights/best.pt"
+YOLO_MODEL_PATH = "my_model/my_model.pt"
 CAM_PREVIEW_SIZE = (480, 360)
 # ----------------------------------
 
@@ -301,12 +301,16 @@ class ACSSGui:
             return
         try:
             self.picam2 = Picamera2()
-            config = self.picam2.create_preview_configuration(main={"format": 'XRGB8888', "size": (640, 480)})
+            # === Same settings as your YOLO test ===
+            config = self.picam2.create_preview_configuration(
+                main={"format": 'XRGB8888', "size": (640, 480)}
+            )
             self.picam2.configure(config)
             self.picam2.start()
+            time.sleep(1)  # let camera warm up a bit
             self.camera_running = True
             threading.Thread(target=self.camera_loop, daemon=True).start()
-            self.logmsg("Camera started.")
+            self.logmsg("Camera started with optimized preview config (640x480).")
         except Exception as e:
             self.logmsg(f"Camera start failed: {e}")
 
@@ -326,28 +330,36 @@ class ACSSGui:
 
     def camera_loop(self):
         frame_counter = 0
+        fps_time = time.time()
         while self.camera_running:
             try:
-                frame = self.picam2.capture_array()
+                frame = self.picam2.capture_array()  # capture raw frame
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-                # YOLO (optional)
-                if self.yolo and frame_counter % 5 == 0:
-                    results = self.yolo(frame, verbose=False, imgsz=640, conf=0.25, max_det=5)
-                    for det in results[0].boxes:
-                        xyxy = det.xyxy.cpu().numpy().squeeze().astype(int)
-                        xmin, ymin, xmax, ymax = xyxy
-                        classname = self.yolo.names[int(det.cls.item())]
-                        conf = det.conf.item()
-                        if conf > 0.5:
-                            cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-                            label = f"{classname}: {int(conf*100)}%"
-                            cv2.putText(frame, label, (xmin, max(ymin-10,10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-                frame_counter += 1
+                # --- YOLO live detection ---
+                if self.yolo:
+                    results = self.yolo.predict(
+                        source=frame,
+                        imgsz=640,
+                        conf=0.25,
+                        max_det=5,
+                        verbose=False
+                    )
+                    frame = results[0].plot()
 
+                # --- FPS overlay ---
+                frame_counter += 1
+                if frame_counter >= 10:
+                    fps = 10 / (time.time() - fps_time)
+                    fps_time = time.time()
+                    cv2.putText(frame, f"FPS: {fps:.1f}", (10, 25),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    frame_counter = 0
+
+                # --- Display on canvas ---
                 display = cv2.resize(frame, CAM_PREVIEW_SIZE)
                 self.update_canvas_with_frame(display)
-                time.sleep(1/30)
+                time.sleep(0.001)  # smooth refresh, minimal delay
             except Exception as e:
                 self.logmsg(f"Camera loop error: {e}")
                 time.sleep(0.2)

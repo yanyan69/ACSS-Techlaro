@@ -62,16 +62,16 @@ void setup() {
   // AS7263 setup
   if (sensor.begin() == false) {
     Serial.println("AS7263 not detected. Check wiring!");
-    while (1); // Halt if sensor not found
+    // No halt - continue for motor testing/integration
+  } else {
+    // Turn on the built-in indicator LED
+    sensor.enableIndicator();
+    sensor.setIndicatorCurrent(3); // 0=1mA, 1=2mA, 2=4mA, 3=8mA (max brightness)
+
+    // Turn on the built-in illumination bulb (for measurement lighting)
+    sensor.enableBulb();
+    sensor.setBulbCurrent(3); // same scale
   }
-
-  // Turn on the built-in indicator LED
-  sensor.enableIndicator();
-  sensor.setIndicatorCurrent(3); // 0=1mA, 1=2mA, 2=4mA, 3=8mA (max brightness)
-
-  // Turn on the built-in illumination bulb (for measurement lighting)
-  sensor.enableBulb();
-  sensor.setBulbCurrent(3); // same scale
 
   Serial.println("Arduino ready for commands.");
 }
@@ -133,7 +133,7 @@ void loop() {
 
     // === MOTOR COMMANDS ===
     else if (command == "MOTOR,ON") {
-      motorForward(255); // Increased to max speed (255) for gear motor inertia
+      motorForward(255); // Max speed for gear motor inertia
       Serial.println("ACK");
     }
     else if (command == "MOTOR,OFF") {
@@ -171,7 +171,7 @@ void loop() {
       char cmd = command.charAt(0);
 
       if (cmd == 'M') { // Motor test
-        motorForward(255);  // Increased to max speed
+        motorForward(255);  // Max speed
         Serial.println("Motor running forward.");
         delay(2000);
         motorStop();

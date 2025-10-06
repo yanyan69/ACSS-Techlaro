@@ -111,8 +111,8 @@ class MotorControlGUI:
                 line = self.serial.readline().decode(errors='ignore').strip()
                 if line:
                     self.logmsg(f"[RX] {line}")
-                else:
-                    self.logmsg("[DEBUG] Read timeout - no data received yet")  # Added for verbose debugging (comment out if too spammy)
+                # else:
+                #     self.logmsg("[DEBUG] Read timeout - no data received yet")  # Commented out to reduce spam
             except Exception as e:
                 self.logmsg(f"[Reader ERR] {e}")
                 time.sleep(0.2)
@@ -121,8 +121,8 @@ class MotorControlGUI:
     def on_close(self):
         self.running = False
         self.close_serial()
+        self.logmsg("🟢 GUI closed safely.")  # Moved before destroy to avoid Tkinter error
         self.root.destroy()
-        self.logmsg("🟢 GUI closed safely.")
 
 
 if __name__ == "__main__":

@@ -2,68 +2,71 @@
 """
 ACSS component test GUI for Raspberry Pi 5.
 - Uses Arduino as IO: expect Arduino serial protocol:
-  Arduino -> Pi: "IR\n" when IR triggered, "AS:val1,val2,...\n" when responding to REQ_AS, "ACK\n" for actions ack
-  Pi -> Arduino: "SORT,L\n" or "SORT,C\n" or "SORT,R\n" ; "REQ_AS\n" ; "MOTOR,ON\n" / "MOTOR,OFF\n"
+- Arduino -> Pi: "IR\n" when IR triggered, "AS:val1,val2,...\n" when responding to REQ_AS, "ACK\n" for actions ack
+- Pi -> Arduino: "SORT,L\n" or "SORT,C\n" or "SORT,R\n" ; "REQ_AS\n" ; "MOTOR,ON\n" / "MOTOR,OFF\n"
 Notes:
 - Automatically opens serial port and starts camera if available.
 - All actions wrapped in try/except with debug printouts.
 """
 
 import sys, threading, time
-
+import numpy as np  # Ensure numpy is imported for tracking logic
+from resources.reze_console import RezeConsole
+console = RezeConsole(use_llm=True, model="gemma2:2b")
 # ---------- Optional imports ----------
 try:
     import tkinter as tk
     from tkinter import scrolledtext, messagebox
 except Exception as e:
-    print("tkinter missing - GUI won't run.", e)
+    console.comment(f"tkinter not found - GUI will not run. {e}", rephrase=True)
     sys.exit(1)
 
 try:
     import serial
-    print("serial is available")
+    console.comment("serial module available", rephrase=False)
 except Exception:
     serial = None
-    print("serial is not available")
+    console.comment("serial module not available", rephrase=True)
 
 try:
     import cv2
     import numpy as np
-    print("cv2 and numpy are available")
+    console.comment("OpenCV and NumPy available", rephrase=False)
 except Exception:
     cv2 = None
     np = None
-    print("cv2 and numpy are not available")
+    console.comment("OpenCV and NumPy not available", rephrase=True)
 
 try:
     from picamera2 import Picamera2, Preview
     PICAMERA2_AVAILABLE = True
-    print("picamera is available")
+    console.comment("Picamera2 available", rephrase=False)
 except Exception:
     PICAMERA2_AVAILABLE = False
-    print("picamera is not available")
+    console.comment("Picamera2 not available", rephrase=True)
 
 try:
     from ultralytics import YOLO
     ULTRALYTICS_AVAILABLE = True
-    print("ultralytics is available")
+    console.comment("Ultralytics available", rephrase=False)
 except Exception:
     ULTRALYTICS_AVAILABLE = False
-    print("ultralytics is not available")
+    console.comment("Ultralytics not available", rephrase=True)
 
 try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
-    print("PIL is available")
+    console.comment("Pillow (PIL) available", rephrase=False)
 except Exception:
     PIL_AVAILABLE = False
-    print("PIL is not available")
+    console.comment("Pillow (PIL) not available", rephrase=True)
 
 # ---------- USER SETTINGS ----------
 SERIAL_PORT = "/dev/ttyUSB0"       # /dev/ttyUSB0
 SERIAL_BAUD = 9600
-YOLO_MODEL_PATH = "my_model/my_model.pt"
+YOLO_MODEL_PATH = "my_model/my_model.pt"  # Fixed typo (.py → .pt); replace with your custom path if needed
 CAM_PREVIEW_SIZE = (480, 360)
+TRACKER_PATH = "bytetrack.yaml"  # Optional: Path to tracker config (download from Ultralytics GitHub if needed)
 # ----------------------------------
 
 class ACSSGui:
@@ -74,9 +77,6 @@ class ACSSGui:
         self.serial_lock = threading.Lock()
         self.running = True
         self.gui_ready = False  # Flag to ensure GUI is ready before threading logs
-
-        # Console persona intro
-        self.console_msg("[Persona: Reze - Chainsaw Man]\n> Cheerful, teasing, a bit flirty but conflicted underneath.\n> Playful tone, Gen Z texting style, quick mood shifts.\n> Deep down, kind-hearted but haunted by her past.")
 
         # ---------- GUI Layout ----------
         frm = tk.Frame(root)
@@ -127,17 +127,19 @@ class ACSSGui:
         self.process_running = False
         self.sort_cooldown = 0
         self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
+        self.sorted_tracks = set()  # Track sorted IDs to avoid re-sorts
+        self.last_cleanup = time.time()  # For periodic cleanup
 
         # ---------- YOLO Model Load ----------
         if ULTRALYTICS_AVAILABLE:
             try:
                 self.logmsg("Loading YOLO model...")
-                self.yolo = YOLO(YOLO_MODEL_PATH)
+                self.yolo = YOLO(YOLO_MODEL_PATH)  # Updated to support YOLOv11
                 self.logmsg(f"YOLO loaded: {YOLO_MODEL_PATH}")
-                self.console_msg("Yolo model's all set - kinda feels like peeking into secrets, doesn't it? lol")
+                console.comment(f"YOLO model loaded: {YOLO_MODEL_PATH}", rephrase=False)
             except Exception as ex:
                 self.logmsg("YOLO load failed: " + str(ex))
-                self.console_msg("Uh oh, yolo wouldn't load... guess we're flying blind today 💔")
+                console.comment("YOLO model load failed", rephrase=True)
 
         # ---------- Auto-start serial & camera ----------
         try:
@@ -145,6 +147,7 @@ class ACSSGui:
             self.open_serial()
         except Exception as e:
             self.logmsg(f"Auto serial open failed: {e}")
+            console.comment(f"Auto serial open failed: {e}", rephrase=True)
 
         if PICAMERA2_AVAILABLE:
             try:
@@ -152,6 +155,7 @@ class ACSSGui:
                 self.start_camera()
             except Exception as e:
                 self.logmsg(f"Auto camera start failed: {e}")
+                console.comment(f"Auto camera start failed: {e}", rephrase=True)
 
         if not PICAMERA2_AVAILABLE:
             for widget in cam_frame.winfo_children():
@@ -162,10 +166,6 @@ class ACSSGui:
         self.gui_ready = True
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    # ---------- Console Messaging (Reze Style) ----------
-    def console_msg(self, msg):
-        print(msg)  # Casual, but proper case
 
     # ---------- Logging ----------
     def logmsg(self, msg):
@@ -193,46 +193,46 @@ class ACSSGui:
         try:
             if serial is None:
                 self.logmsg("pyserial not available.")
-                self.console_msg("Pyserial's awol... can't chat with arduino without it, sigh")
+                console.comment("pyserial not available", rephrase=True)
                 return
             if self.serial and self.serial.is_open:
                 self.logmsg("Serial already open.")
                 return
             self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
             self.logmsg(f"Opened serial {SERIAL_PORT}@{SERIAL_BAUD}")
-            self.console_msg(f"Serial's connected on {SERIAL_PORT} - ready to boss that arduino around, hehe")
+            console.comment(f"Serial connected on {SERIAL_PORT}", rephrase=False)
             # Delay thread start until GUI is ready
             self.root.after(100, lambda: threading.Thread(target=self.serial_reader_thread, daemon=True).start())
         except Exception as e:
             self.logmsg("Failed to open serial: " + str(e))
-            self.console_msg("Serial open flopped... check the port? T-T")
+            console.comment("Failed to open serial port", rephrase=True)
 
     def close_serial(self):
         try:
             if self.serial and self.serial.is_open:
                 self.serial.close()
                 self.logmsg("Serial closed.")
-                self.console_msg("Serial's shut down - quiet now, like a rainy day")
+                console.comment("Serial port closed", rephrase=False)
         except Exception as e:
             self.logmsg("Error closing serial: " + str(e))
-            self.console_msg("Closing serial got messy... whatever, it's fine lol")
+            console.comment("Error closing serial port", rephrase=True)
 
     def send_cmd(self, text):
         """Send any general command to Arduino with newline + flush"""
         try:
             if not self.serial or not self.serial.is_open:
                 self.logmsg(f"[WARN] Serial not open — can't send: {text}")
-                self.console_msg(f"Tried sending {text} but serial's not even open... oops 💀")
+                console.comment(f"Cannot send command {text} because serial not open", rephrase=True)
                 return
             full_cmd = (text.strip().upper() + "\n").encode('utf-8')
             with self.serial_lock:
                 self.serial.write(full_cmd)
                 self.serial.flush()
             self.logmsg(f"[TX] {text.strip().upper()}")
-            self.console_msg(f"Zapped '{text}' over to arduino - hope it listens this time ;)")
+            console.comment(f"Sent command {text} to Arduino", rephrase=False)
         except Exception as e:
             self.logmsg(f"[ERR] Failed to send command '{text}': {e}")
-            self.console_msg(f"Command '{text}' bounced back... arduino ignoring me? rude XD")
+            console.comment(f"Failed to send command {text}", rephrase=True)
 
     def send_sort(self, char):
         """Send servo sort command (L, C, R)."""
@@ -240,60 +240,61 @@ class ACSSGui:
             char = char.strip().upper()
             if char not in ("L", "C", "R"):
                 self.logmsg(f"[WARN] Invalid servo command: {char}")
-                self.console_msg(f"{char}? that's not a valid sort move... try l, c, or r next time, silly")
+                console.comment(f"Invalid servo command: {char}", rephrase=True)
                 return
             cmd = f"SORT,{char}"
             self.logmsg(f"[SERVO] Sending: {cmd}")
-            self.console_msg(f"Twirling the servo {char} - imagine it dancing just for you~")
+            console.comment(f"Sending servo command {char}", rephrase=False)
             self.send_cmd(cmd)
         except Exception as e:
             self.logmsg(f"[ERR] Servo send_sort failed: {e}")
-            self.console_msg("Servo sort glitched out... gears probably laughing at me")
+            console.comment("Failed to send servo command", rephrase=True)
 
     # ---------- Process Control ----------
     def start_process(self):
         try:
             if not (self.serial and self.serial.is_open):
                 self.logmsg("Open serial first.")
-                self.console_msg("Can't start without serial... plug me in first? pretty please")
+                console.comment("Cannot start process because serial not open", rephrase=True)
                 return
             if not self.yolo:
                 self.logmsg("YOLO model not loaded.")
-                self.console_msg("Yolo's not ready... feels exposed without it lol")
+                console.comment("Cannot start process because YOLO not loaded", rephrase=True)
                 return
             if self.process_running:
                 self.logmsg("Process already running.")
-                self.console_msg("Process is already humming along - don't wanna overload it, cutie")
+                console.comment("Process already running", rephrase=False)
                 return
             self.send_cmd("MOTOR,ON")
             self.process_running = True
             self.sort_cooldown = time.time()
+            self.sorted_tracks.clear()  # Reset sorted tracks on process start
             self.logmsg("Process started: Motor ON, detection active.")
-            self.console_msg("Process kicked off! motor's whirring, eyes on for copra - let's make some magic happen 💕")
+            console.comment("Process started: Motor ON, detection active", rephrase=False)
         except Exception as e:
             self.logmsg(f"Start process error: {e}")
-            self.console_msg("Starting process tripped... chaos strikes again, huh? T-T")
+            console.comment("Error starting process", rephrase=True)
 
     def stop_process(self):
         try:
             if not self.process_running:
                 self.logmsg("Process not running.")
-                self.console_msg("Nothing to stop... it's all chill already")
+                console.comment("Process not running", rephrase=False)
                 return
             self.send_cmd("MOTOR,OFF")
             self.process_running = False
             self.logmsg("Process stopped: Motor OFF, detection inactive.")
-            self.console_msg("Process halted - motor's taking a breather. quiet moments like this... kinda nice, right?")
+            console.comment("Process stopped: Motor OFF, detection inactive", rephrase=False)
         except Exception as e:
             self.logmsg(f"Stop process error: {e}")
-            self.console_msg("Stopping went sideways... guess it didn't wanna quit easy lol")
+            console.comment("Error stopping process", rephrase=True)
 
     # ---------- Serial Reader ----------
     def serial_reader_thread(self):
         if not self.gui_ready:
             time.sleep(0.5)  # Extra safety delay
         self.logmsg("Serial reader started.")
-        self.console_msg("Serial reader's lurking in the background - catching whispers from arduino")
+        console.comment("Serial reader started", rephrase=False)
         try:
             ir_state = False
             last_ir_report_time = time.time()
@@ -304,7 +305,7 @@ class ACSSGui:
                         if self.ir_monitoring and ir_state and (time.time() - last_ir_report_time > 1.0):
                             ir_state = False
                             self.logmsg("IR: No object detected (timeout)")
-                            self.console_msg("Ir went quiet... object's ghosted us, typical")
+                            console.comment("IR no object detected", rephrase=False)
                         continue
 
                     # Handle IR silently unless monitoring and state change
@@ -314,33 +315,33 @@ class ACSSGui:
                             if not ir_state:
                                 ir_state = True
                                 self.logmsg("IR: Object detected")
-                                self.console_msg("Ir lit up - something's sneaking by, eyes peeled!")
+                                console.comment("IR object detected", rephrase=False)
                         # else: silent, no noise
                     elif line.startswith("AS:"):
                         vals = line[3:].split(",")
                         self.logmsg(f"AS values: {vals}")
-                        self.console_msg(f"As readings: {vals} - colors whispering secrets again")
+                        console.comment(f"Received AS values: {vals}", rephrase=False)
                     elif line == "ACK":
                         self.logmsg("ACK from Arduino")
-                        self.console_msg("Ack! arduino's all 'gotcha' - feels good when they listen")
+                        console.comment("Received ACK from Arduino", rephrase=False)
                     # No else: silent for unknowns, keeps it clean
                 except Exception as e:
                     self.logmsg(f"Serial reader exception: {e}")
-                    self.console_msg(f"Serial hiccup: {e} - shaking it off")
+                    console.comment("Serial reader exception", rephrase=True)
                     time.sleep(0.2)
         except Exception as outer:
             self.logmsg(f"Serial reader crashed: {outer}")
-            self.console_msg("Serial reader crashed... total blackout, oof 💔")
+            console.comment("Serial reader crashed", rephrase=True)
 
     # ---------- AS Request ----------
     def request_as(self):
         try:
             if not (self.serial and self.serial.is_open):
                 self.logmsg("Open serial first.")
-                self.console_msg("Serial's offline - can't beg for as data like this")
+                console.comment("Cannot request AS because serial not open", rephrase=True)
                 return
             self.logmsg("Sending REQ_AS and waiting for response...")
-            self.console_msg("Asking arduino for as vibes... fingers crossed it shares")
+            console.comment("Requesting AS7263 data", rephrase=False)
             with self.serial_lock:
                 self.serial.reset_input_buffer()
                 self.serial.write(b"REQ_AS\n")
@@ -353,52 +354,52 @@ class ACSSGui:
                     continue
                 if line.startswith("AS:"):
                     self.logmsg("AS response received: " + line)
-                    self.console_msg(f"As came through! {line} - pretty colors, huh?")
+                    console.comment(f"AS response received: {line[3:]}", rephrase=False)
                     got = True
                     break
             if not got:
                 self.logmsg("No AS response within timeout.")
-                self.console_msg("As timed out... arduino playing hard to get?")
+                console.comment("No AS response within timeout", rephrase=True)
         except Exception as e:
             self.logmsg(f"REQ_AS failed: {e}")
-            self.console_msg("Req_as bombed... guess no spectrum today T-T")
+            console.comment("Failed to request AS", rephrase=True)
 
     # ---------- IR Monitor ----------
     def start_ir_monitor(self):
         try:
             if not (self.serial and self.serial.is_open):
                 self.logmsg("Open serial first.")
-                self.console_msg("Start ir? serial's not even up - tease")
+                console.comment("Cannot start IR monitor because serial not open", rephrase=True)
                 return
             if self.ir_monitoring:
                 self.logmsg("IR monitor already running.")
-                self.console_msg("Ir's already watching... double eyes? spooky lol")
+                console.comment("IR monitor already running", rephrase=False)
                 return
             self.ir_monitoring = True
             self.logmsg("IR monitor started.")
-            self.console_msg("Ir monitor on - now we're spying on sneaky objects")
+            console.comment("IR monitor started", rephrase=False)
         except Exception as e:
             self.logmsg(f"IR monitor start error: {e}")
-            self.console_msg("Ir start fumbled... whatever, it's not that deep")
+            console.comment("Error starting IR monitor", rephrase=True)
 
     def stop_ir_monitor(self):
         try:
             self.ir_monitoring = False
             self.logmsg("IR monitor stopped.")
-            self.console_msg("Ir monitor off - back to ignoring the chaos")
+            console.comment("IR monitor stopped", rephrase=False)
         except Exception as e:
             self.logmsg(f"IR monitor stop error: {e}")
-            self.console_msg("Stopping ir got weird... fine, it can linger")
+            console.comment("Error stopping IR monitor", rephrase=True)
 
     # ---------- Camera ----------
     def start_camera(self):
         if self.camera_running:
             self.logmsg("Camera already running.")
-            self.console_msg("Camera's already rolling - don't wanna blind it")
+            console.comment("Camera already running", rephrase=False)
             return
         if not PICAMERA2_AVAILABLE:
             self.logmsg("picamera2 not available.")
-            self.console_msg("No picamera... guess we're blind in one eye")
+            console.comment("picamera2 not available", rephrase=True)
             return
         try:
             self.picam2 = Picamera2()
@@ -412,16 +413,16 @@ class ACSSGui:
             self.camera_running = True
             threading.Thread(target=self.camera_loop, daemon=True).start()
             self.logmsg("Camera started with optimized preview config (640x480).")
-            self.console_msg("Camera's awake and peeking - world looks sharper now, doesn't it?")
+            console.comment("Camera started", rephrase=False)
         except Exception as e:
             self.logmsg(f"Camera start failed: {e}")
-            self.console_msg("Camera start crashed... blurry day ahead 💀")
+            console.comment("Failed to start camera", rephrase=True)
 
     def stop_camera(self):
         try:
             if not self.camera_running:
                 self.logmsg("Camera not running.")
-                self.console_msg("Camera's already napping")
+                console.comment("Camera not running", rephrase=False)
                 return
             self.camera_running = False
             time.sleep(0.2)
@@ -429,10 +430,10 @@ class ACSSGui:
                 self.picam2.stop()
                 self.picam2 = None
             self.logmsg("Camera stopped.")
-            self.console_msg("Camera shut eye - sweet dreams of copra")
+            console.comment("Camera stopped", rephrase=False)
         except Exception as e:
             self.logmsg(f"Camera stop error: {e}")
-            self.console_msg("Stopping camera glitched... it's clinging on")
+            console.comment("Error stopping camera", rephrase=True)
 
     def camera_loop(self):
         frame_counter = 0
@@ -442,31 +443,51 @@ class ACSSGui:
                 frame = self.picam2.capture_array()  # capture raw frame
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-                # --- YOLO live detection ---
+                # --- YOLO live tracking (updated for object tracking) ---
                 results = None
                 if self.yolo:
-                    results = self.yolo.predict(
+                    results = self.yolo.track(  # Changed from predict to track
                         source=frame,
-                        imgsz=640,
+                        persist=True,  # Maintain track IDs across frames
+                        tracker=TRACKER_PATH,  # Optional: ByteTrack for speed
                         conf=0.25,
                         max_det=5,
                         verbose=False
                     )
-                    frame = results[0].plot()
+                    frame = results[0].plot()  # Plots boxes + track IDs!
 
-                    # --- Integrated Process Detection ---
+                    # --- Integrated Process Detection with Tracking ---
                     current_time = time.time()
                     if self.process_running and results[0].boxes is not None and len(results[0].boxes) > 0 and current_time > self.sort_cooldown:
-                        cls_tensor = results[0].boxes.cls
-                        conf_tensor = results[0].boxes.conf
-                        max_idx = conf_tensor.argmax().item()
-                        cls = int(cls_tensor[max_idx].item())
-                        conf = conf_tensor[max_idx].item()
-                        sort_char = self.class_to_sort.get(cls, 'C')
-                        self.send_sort(sort_char)
-                        self.logmsg(f"Detected class {cls} conf {conf:.2f}, sorting {sort_char}")
-                        self.console_msg(f"Caught class {cls} at {conf:.2f} conf - flinging it {sort_char}, watch it fly! teehee")
-                        self.sort_cooldown = current_time + 2.0  # 2-second cooldown to avoid multiple sorts per object
+                        # Get track IDs
+                        track_ids = results[0].boxes.id.cpu().numpy() if results[0].boxes.id is not None else np.array([])
+                        
+                        # For each detection, check if it's a new track (sort only once per ID)
+                        boxes = results[0].boxes.xyxy.cpu().numpy()  # Bounding boxes
+                        cls_tensor = results[0].boxes.cls.cpu().numpy()
+                        conf_tensor = results[0].boxes.conf.cpu().numpy()
+                        
+                        for i in range(len(cls_tensor)):  # Loop over detections
+                            track_id = int(track_ids[i]) if len(track_ids) > i else -1
+                            if track_id in self.sorted_tracks:  # Skip if already sorted
+                                continue
+                            
+                            cls = int(cls_tensor[i])
+                            conf = conf_tensor[i]
+                            if conf > 0.25:  # Extra conf check per track
+                                sort_char = self.class_to_sort.get(cls, 'C')
+                                self.send_sort(sort_char)
+                                self.logmsg(f"Tracked ID {track_id}: class {cls} conf {conf:.2f}, sorting {sort_char}")
+                                console.comment(f"Detected track {track_id} class {cls} conf {conf:.2f} sorting {sort_char}", rephrase=False)
+                                self.sorted_tracks.add(track_id)  # Mark as sorted
+                                self.sort_cooldown = current_time + 2.0  # Global debounce
+                                break  # Sort only the first valid track per frame (leading copra)
+
+                        # Periodic cleanup of old tracks
+                        if current_time - self.last_cleanup > 10.0:  # Every 10s
+                            if len(results[0].boxes) == 0:
+                                self.sorted_tracks.clear()  # Reset if empty
+                            self.last_cleanup = current_time
 
                 # --- FPS overlay ---
                 frame_counter += 1
@@ -483,7 +504,7 @@ class ACSSGui:
                 time.sleep(0.001)  # smooth refresh, minimal delay
             except Exception as e:
                 self.logmsg(f"Camera loop error: {e}")
-                self.console_msg(f"Camera loop stuttered: {e} - picking up the pace")
+                console.comment(f"Camera loop error: {e}", rephrase=True)
 
     def update_canvas_with_frame(self, bgr_frame):
         try:
@@ -498,7 +519,7 @@ class ACSSGui:
                 cv2.waitKey(1)
         except Exception as e:
             self.logmsg(f"Display frame error: {e}")
-            self.console_msg(f"Frame display fumbled: {e} - next one's better")
+            console.comment(f"Display frame error: {e}", rephrase=True)
 
     # ---------- Shutdown ----------
     def on_close(self):
@@ -511,11 +532,10 @@ class ACSSGui:
             if self.serial and self.serial.is_open:
                 self.serial.close()
             self.logmsg("Application closed safely.")
-            self.console_msg("Wrapping up - til next time, stay out of the rain... or don't, it's kinda romantic")
+            console.comment("Application closed", rephrase=False)
             self.root.destroy()
         except Exception as e:
-            print("Shutdown error:", e)
-            self.console_msg("Shutdown got chaotic... cya anyway")
+            console.comment(f"Shutdown error: {e}", rephrase=True)
 
 
 if __name__ == "__main__":
@@ -524,4 +544,4 @@ if __name__ == "__main__":
         app = ACSSGui(root)
         root.mainloop()
     except Exception as e:
-        print("Fatal error:", e)
+        console.comment(f"Fatal error: {e}", rephrase=True)

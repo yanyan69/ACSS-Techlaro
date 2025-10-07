@@ -60,7 +60,7 @@ except Exception:
     print("PIL is not available")
 
 # ---------- USER SETTINGS ----------
-SERIAL_PORT = "/dev/ttyUSB0"       # 
+SERIAL_PORT = "/dev/ttyUSB0"       # /dev/ttyUSB0
 SERIAL_BAUD = 9600
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 CAM_PREVIEW_SIZE = (480, 360)
@@ -73,6 +73,7 @@ class ACSSGui:
         self.serial = None
         self.serial_lock = threading.Lock()
         self.running = True
+        self.gui_ready = False  # Flag to ensure GUI is ready before threading logs
 
         # Console persona intro
         self.console_msg("[Persona: Reze - Chainsaw Man]\n> Cheerful, teasing, a bit flirty but conflicted underneath.\n> Playful tone, Gen Z texting style, quick mood shifts.\n> Deep down, kind-hearted but haunted by her past.")
@@ -157,6 +158,9 @@ class ACSSGui:
                 if isinstance(widget, tk.Button) and widget['text'] in ("Start Camera Preview", "Stop Camera"):
                     widget.config(state='disabled')
 
+        # Set GUI ready after layout
+        self.gui_ready = True
+
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---------- Console Messaging (Reze Style) ----------
@@ -169,7 +173,7 @@ class ACSSGui:
         full_msg = f"[{ts}] {msg}"
 
         def _do_log():
-            if not hasattr(self, 'log') or not self.log.winfo_exists():
+            if not hasattr(self, 'log') or not self.log.winfo_exists() or not self.gui_ready:
                 return
             try:
                 self.log.config(state='normal')
@@ -179,7 +183,10 @@ class ACSSGui:
             except tk.TclError:
                 pass  # Widget destroyed
 
-        self.root.after(0, _do_log)
+        if self.gui_ready:
+            self.root.after(0, _do_log)
+        else:
+            print(full_msg)  # Fallback for early logs
 
     # ---------- Serial ----------
     def open_serial(self):
@@ -194,7 +201,8 @@ class ACSSGui:
             self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
             self.logmsg(f"Opened serial {SERIAL_PORT}@{SERIAL_BAUD}")
             self.console_msg(f"Serial's connected on {SERIAL_PORT} - ready to boss that arduino around, hehe")
-            threading.Thread(target=self.serial_reader_thread, daemon=True).start()
+            # Delay thread start until GUI is ready
+            self.root.after(100, lambda: threading.Thread(target=self.serial_reader_thread, daemon=True).start())
         except Exception as e:
             self.logmsg("Failed to open serial: " + str(e))
             self.console_msg("Serial open flopped... check the port? T-T")
@@ -282,6 +290,8 @@ class ACSSGui:
 
     # ---------- Serial Reader ----------
     def serial_reader_thread(self):
+        if not self.gui_ready:
+            time.sleep(0.5)  # Extra safety delay
         self.logmsg("Serial reader started.")
         self.console_msg("Serial reader's lurking in the background - catching whispers from arduino")
         try:

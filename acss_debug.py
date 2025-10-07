@@ -10,7 +10,6 @@ Notes:
 """
 
 import sys, threading, time
-import numpy as np  # Ensure numpy is imported for tracking logic
 from resources.reze_console import RezeConsole
 console = RezeConsole(use_llm=True, model="gemma2:2b")
 # ---------- Optional imports ----------
@@ -18,15 +17,15 @@ try:
     import tkinter as tk
     from tkinter import scrolledtext, messagebox
 except Exception as e:
-    console.comment(f"tkinter not found - GUI will not run. {e}", rephrase=True)
+    console.comment(f"Tkinter not found - GUI will not run. {e}", rephrase=True)
     sys.exit(1)
 
 try:
     import serial
-    console.comment("serial module available", rephrase=False)
+    console.comment("Serial module available", rephrase=False)
 except Exception:
     serial = None
-    console.comment("serial module not available", rephrase=True)
+    console.comment("Serial module not available", rephrase=True)
 
 try:
     import cv2
@@ -39,7 +38,7 @@ except Exception:
 
 try:
     from picamera2 import Picamera2, Preview
-    PICAMERA2_AVAILABLE = True
+    PICAMERA2_AVAILABLE = True 
     console.comment("Picamera2 available", rephrase=False)
 except Exception:
     PICAMERA2_AVAILABLE = False
@@ -438,18 +437,19 @@ class ACSSGui:
     def camera_loop(self):
         frame_counter = 0
         fps_time = time.time()
+        debug_tracking = True  # Set False in prod to reduce logs
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()  # capture raw frame
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-                # --- YOLO live tracking (updated for object tracking) ---
+                # --- YOLO live tracking ---
                 results = None
                 if self.yolo:
-                    results = self.yolo.track(  # Changed from predict to track
+                    results = self.yolo.track(
                         source=frame,
                         persist=True,  # Maintain track IDs across frames
-                        tracker=TRACKER_PATH,  # Optional: ByteTrack for speed
+                        tracker=TRACKER_PATH,  # ByteTrack for speed
                         conf=0.25,
                         max_det=5,
                         verbose=False
@@ -462,31 +462,44 @@ class ACSSGui:
                         # Get track IDs
                         track_ids = results[0].boxes.id.cpu().numpy() if results[0].boxes.id is not None else np.array([])
                         
-                        # For each detection, check if it's a new track (sort only once per ID)
-                        boxes = results[0].boxes.xyxy.cpu().numpy()  # Bounding boxes
+                        # Get bounding boxes for y-centers
+                        boxes = results[0].boxes.xyxy.cpu().numpy()  # [x1, y1, x2, y2]
                         cls_tensor = results[0].boxes.cls.cpu().numpy()
                         conf_tensor = results[0].boxes.conf.cpu().numpy()
                         
-                        for i in range(len(cls_tensor)):  # Loop over detections
+                        # Find candidate tracks: unsorted, high conf
+                        candidates = []
+                        for i in range(len(cls_tensor)):
                             track_id = int(track_ids[i]) if len(track_ids) > i else -1
-                            if track_id in self.sorted_tracks:  # Skip if already sorted
-                                continue
+                            if track_id not in self.sorted_tracks and track_id != -1:
+                                y_center = (boxes[i, 1] + boxes[i, 3]) / 2  # Avg y (bottom-to-top: min y = leading)
+                                cls = int(cls_tensor[i])
+                                conf = conf_tensor[i]
+                                if conf > 0.25:
+                                    candidates.append((track_id, cls, conf, y_center, i))
+                        
+                        if candidates:
+                            # Sort candidates by y-center (ascending: lowest y first = leading/highest on screen)
+                            candidates.sort(key=lambda x: x[3])  # Sort by y_center
+                            leading_track = candidates[0]  # First = leading
+                            track_id, cls, conf, y_center, orig_i = leading_track
                             
-                            cls = int(cls_tensor[i])
-                            conf = conf_tensor[i]
-                            if conf > 0.25:  # Extra conf check per track
-                                sort_char = self.class_to_sort.get(cls, 'C')
-                                self.send_sort(sort_char)
-                                self.logmsg(f"Tracked ID {track_id}: class {cls} conf {conf:.2f}, sorting {sort_char}")
-                                console.comment(f"Detected track {track_id} class {cls} conf {conf:.2f} sorting {sort_char}", rephrase=False)
-                                self.sorted_tracks.add(track_id)  # Mark as sorted
-                                self.sort_cooldown = current_time + 2.0  # Global debounce
-                                break  # Sort only the first valid track per frame (leading copra)
+                            sort_char = self.class_to_sort.get(cls, 'C')
+                            self.send_sort(sort_char)
+                            self.logmsg(f"Tracked ID {track_id} (y-center {y_center:.1f}): class {cls} conf {conf:.2f}, sorting {sort_char}")
+                            if debug_tracking:
+                                console.comment(f"Leading track {track_id} at y={y_center:.1f} (class {cls}, conf {conf:.2f}) -> {sort_char}", rephrase=False)
+                            self.sorted_tracks.add(track_id)  # Mark as sorted
+                            self.sort_cooldown = current_time + 2.0  # Global debounce
+                        elif debug_tracking:
+                            console.comment(f"No new unsorted tracks this frame (total detections: {len(cls_tensor)})", rephrase=False)
 
                         # Periodic cleanup of old tracks
                         if current_time - self.last_cleanup > 10.0:  # Every 10s
                             if len(results[0].boxes) == 0:
                                 self.sorted_tracks.clear()  # Reset if empty
+                                if debug_tracking:
+                                    console.comment("Cleared stale tracks (empty frame)", rephrase=False)
                             self.last_cleanup = current_time
 
                 # --- FPS overlay ---

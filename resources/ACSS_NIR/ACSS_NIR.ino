@@ -28,6 +28,13 @@ AS726X sensor;
 unsigned long lastIrTime = 0;
 const unsigned long IR_DEBOUNCE = 500;  // ms
 
+// Servo safety limits (adjusted: left=80°, center=90°, right=100° for 10° deflection)
+const int SERVO_LEFT_ANGLE = 65;  // Safe left position
+const int SERVO_CENTER = 30;      // Neutral/center position
+const int SERVO_RIGHT_ANGLE = 5 ; // Center + 10° (right position)
+const int SERVO_MIN_SAFE = 5;    // Absolute min angle to prevent over-rotation
+const int SERVO_MAX_SAFE = 70;   // Absolute max angle
+
 // === SETUP ===
 void setup() {
   // Serial for communication with RPi
@@ -43,8 +50,9 @@ void setup() {
   // IR proximity sensor
   pinMode(IR_SENSOR, INPUT);
 
-  // Servo setup
-  sorterServo.attach(SERVO_PIN);
+  // Servo setup with pulse width limits for extra safety (prevents signal overdrive)
+  sorterServo.attach(SERVO_PIN, 500, 2500);  // minPulse=500µs, maxPulse=2500µs (safer than defaults)
+  sorterServo.write(SERVO_CENTER);  // Start at center
 
   // Enable motor driver standby
   digitalWrite(TB6612_STBY, HIGH);
@@ -91,6 +99,15 @@ void motorStop() {
   analogWrite(TB6612_PWMA, 0);
 }
 
+// === SERVO SAFE WRITE (NEW FUNCTION FOR LIMITS) ===
+void safeServoWrite(int angle) {
+  // Clamp to safe range to prevent exceeding physical limits
+  angle = constrain(angle, SERVO_MIN_SAFE, SERVO_MAX_SAFE);
+  sorterServo.write(angle);
+  Serial.print("DEBUG: Servo moved to ");  // Debug output
+  Serial.println(angle);
+}
+
 // === LOOP ===
 void loop() {
   // Continuous IR monitoring
@@ -118,14 +135,17 @@ void loop() {
     if (command.startsWith("SORT,")) {
       String dir = command.substring(5);
       if (dir == "L") {
-        sorterServo.write(60);  // left
+        safeServoWrite(SERVO_LEFT_ANGLE);  // 80° for left
         Serial.println("ACK");
+        delay(500);  // Brief settle time to avoid jitter
       } else if (dir == "C") {
-        sorterServo.write(90);  // center
+        safeServoWrite(SERVO_CENTER);  // 90° for center
         Serial.println("ACK");
+        delay(500);
       } else if (dir == "R") {
-        sorterServo.write(120); // right
+        safeServoWrite(SERVO_RIGHT_ANGLE);  // 100° for right
         Serial.println("ACK");
+        delay(500);
       } else {
         Serial.println("Unknown sort direction.");
       }
@@ -178,14 +198,14 @@ void loop() {
         Serial.println("Motor stopped.");
       }
       else if (cmd == 'S') { // Servo test
-        Serial.println("Servo test: moving -30, 0, +30.");
-        sorterServo.write(60);
+        Serial.println("Servo test: moving left(80°), center(90°), right(100°).");
+        safeServoWrite(SERVO_LEFT_ANGLE);
         delay(1000);
-        sorterServo.write(90);
+        safeServoWrite(SERVO_CENTER);
         delay(1000);
-        sorterServo.write(120);
+        safeServoWrite(SERVO_RIGHT_ANGLE);
         delay(1000);
-        sorterServo.write(90);
+        safeServoWrite(SERVO_CENTER);
         Serial.println("Servo test done.");
       }
       else if (cmd == 'I') { // IR sensor test

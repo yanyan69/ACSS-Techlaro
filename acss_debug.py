@@ -60,7 +60,7 @@ except Exception:
     print("PIL is not available")
 
 # ---------- USER SETTINGS ----------
-SERIAL_PORT = "COM6"       # /dev/ttyUSB0
+SERIAL_PORT = "/dev/ttyUSB0"       # 
 SERIAL_BAUD = 9600
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 CAM_PREVIEW_SIZE = (480, 360)

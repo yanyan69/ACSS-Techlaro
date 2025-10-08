@@ -5,6 +5,7 @@ ACSS GUI with Tabs, Process Control, and Servo Fixes.
 - Uses motor/servo control with FIFO queue for multiple copra.
 - AS7263 bulb simulation with delays, no real data used.
 - Suppressed spammy logs, full screen, reset stats, unknown to Overcooked.
+- Queuing stops during conveyor pauses to avoid stacking, but model runs.
 """
 
 import tkinter as tk
@@ -118,6 +119,7 @@ class ACSSGui:
             'start_time': None,
             'end_time': None
         }
+        self.conveyor_paused = False  # New flag for conveyor pause state
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -458,11 +460,12 @@ class ACSSGui:
             try:
                 if self.sort_queue and time.time() >= self.sort_queue[0]['detection_time'] + SORT_DELAY:
                     item = self.sort_queue.popleft()
-                    self.send_cmd("MOTOR,OFF")  # Stop exactly at 2s (SORT_DELAY)
-                    self.send_sort(item['sort_char'])  # Rotate servo
-                    time.sleep(SERVO_CHUTE_CLEAR_TIME)  # 1.5s for servo and chute clear
-                    self.send_cmd("MOTOR,ON")  # Move conveyor to drop copra
-                    time.sleep(POST_SORT_ADVANCE)  # 1s to advance into chute
+                    self.conveyor_paused = True  # Set pause flag
+                    self.send_cmd("MOTOR,OFF")
+                    self.send_sort(item['sort_char'])
+                    time.sleep(SERVO_CHUTE_CLEAR_TIME)
+                    self.send_cmd("MOTOR,ON")
+                    time.sleep(POST_SORT_ADVANCE)
                     # Wait for next copra's SORT_DELAY if queued
                     if self.sort_queue:
                         next_item_time = self.sort_queue[0]['detection_time'] + SORT_DELAY
@@ -470,14 +473,14 @@ class ACSSGui:
                         if current_time < next_item_time:
                             remaining_delay = next_item_time - current_time
                             self.send_cmd("MOTOR,OFF")
-                            time.sleep(remaining_delay)  # Wait for next copra's 2s
-                    # Schedule stats update
+                            time.sleep(remaining_delay)
+                    self.conveyor_paused = False  # Reset pause flag
                     threading.Timer(DROP_DELAY, lambda: self._update_stats_after_drop(item['category'], item['moisture'])).start()
-                time.sleep(0.01)  # Tight loop for precise timing
+                time.sleep(0.01)
             except Exception as e:
                 self._log_message(f"Sort processor error: {e}")
                 print(f"Sort processor error: {e}")
-            
+
     def _update_stats_after_drop(self, category, moisture):
         try:
             self.stats[category] += 1
@@ -568,7 +571,7 @@ class ACSSGui:
                     yolo_start = time.time()
                     results = self.yolo.predict(
                         source=frame,
-                        conf=0.5,
+                        conf=0.3,
                         max_det=3,
                         verbose=False
                     )
@@ -584,7 +587,7 @@ class ACSSGui:
 
                 # Process sorting
                 as7263_valid = self.as7263_data is not None and (current_time - self.as7263_timestamp) < 0.5
-                if self.process_running and has_detection and current_time > self.detection_cooldown and as7263_valid:
+                if self.process_running and has_detection and current_time > self.detection_cooldown and as7263_valid and not self.conveyor_paused:  # Skip queuing if paused
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                     conf_tensor = results[0].boxes.conf.cpu().numpy()

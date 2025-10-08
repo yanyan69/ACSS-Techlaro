@@ -53,8 +53,8 @@ SORT_DELAY = 1.75  # Seconds from detection to servo actuation
 DROP_DELAY = 1.5  # Seconds from servo actuation to bin drop (for stats)
 SERVO_CHUTE_CLEAR_TIME = 0  # Seconds for servo settle and chute clear
 AS_BULB_DELAY = 0.5  # Seconds for AS7263 bulb on/off simulation
-DETECTION_COOLDOWN = 1.0  # Seconds before allowing new detection
-POST_SORT_ADVANCE = 1.0  # Seconds to run conveyor post-sort to position next copra
+DETECTION_COOLDOWN = 0.75  # Seconds before allowing new detection
+POST_SORT_ADVANCE = 0.5  # Seconds to run conveyor post-sort to position next copra
 # ---------------------------------------------------
 
 class ACSSGui:

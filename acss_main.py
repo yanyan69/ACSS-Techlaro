@@ -41,7 +41,7 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (640, 480)  # Try (320, 240) if PDAF errors persist
+CAM_PREVIEW_SIZE = (320, 240)  # Try (320, 240) if PDAF errors persist
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
@@ -257,8 +257,9 @@ class ACSSGui:
             end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
             self.start_time_label.config(text=start_str)
             self.end_time_label.config(text=end_str)
+            self.root.update()  # Force GUI refresh
         except Exception as e:
-            self._log_message(f"Stats update error: {e}")
+            self._log_message(f"Stats update error: {type(e).__name__}: {str(e)}")
 
     # ------------------- ABOUT --------------------
     def _build_about_tab(self):
@@ -450,7 +451,7 @@ class ACSSGui:
         last_frame_time = time.time()
         last_fps_log = time.time()
         last_drop_log = time.time()
-        display_skip = 0  # Skip every other frame for display
+        display_skip = 0
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()
@@ -458,7 +459,7 @@ class ACSSGui:
 
                 # Check for significant frame drops
                 current_time = time.time()
-                if current_time - last_frame_time > 0.2 and current_time - last_drop_log > 5.0:  # >200ms, log every 5s
+                if current_time - last_frame_time > 0.2 and current_time - last_drop_log > 5.0:
                     self._log_message(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
                     last_drop_log = current_time
                 last_frame_time = current_time
@@ -467,6 +468,7 @@ class ACSSGui:
                 if self.yolo:
                     yolo_start = time.time()
                     if self.process_running:
+                        self.send_cmd("REQ_AS")  # Request AS7263 reading
                         results = self.yolo.track(
                             source=frame,
                             persist=True,
@@ -483,7 +485,7 @@ class ACSSGui:
                             verbose=False
                         )
                     yolo_time = time.time() - yolo_start
-                    if yolo_time > 0.1:  # Log if YOLO takes >100ms
+                    if yolo_time > 0.1:
                         self._log_message(f"YOLO processing time: {yolo_time:.3f}s")
 
                 # Process sorting if results exist and AS7263 validates
@@ -506,13 +508,13 @@ class ACSSGui:
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
                         if conf > 0.3:
-                            # Estimate moisture based on confidence
+                            # Estimate moisture
                             if cls == 0:  # Raw
-                                moisture = 7.1 + (conf - 0.3) * (8.0 - 7.1) / 0.7  # Map 0.3-1.0 to 7.1-8.0%
+                                moisture = 7.1 + (conf - 0.3) * (8.0 - 7.1) / 0.7
                             elif cls == 1:  # Standard
-                                moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7  # Map 0.3-1.0 to 6.0-7.0%
+                                moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
                             else:  # Overcooked
-                                moisture = 5.0 + (conf - 0.3) * (5.9 - 5.0) / 0.7  # Map 0.3-1.0 to 5.0-5.9%
+                                moisture = 5.0 + (conf - 0.3) * (5.9 - 5.0) / 0.7
                             moisture = round(moisture, 1)
 
                             if track_id != -1 and track_id not in self.sorted_tracks and y_center < SORT_ZONE_Y:
@@ -522,6 +524,9 @@ class ACSSGui:
                             elif y_center < FALLBACK_ZONE_Y:
                                 self._log_message(f"Untracked detection (class {cls}, conf {conf:.2f}, y={y_center:.1f}, moisture {moisture}%)")
                                 untracked_candidates.append((cls, conf, y_center, moisture))
+
+                    if candidates or untracked_candidates:
+                        self.send_cmd("AS_IND_ON")  # Turn on AS7263 LED for 1s
 
                     for candidate in sorted(candidates, key=lambda x: (self.track_start_times[x[0]], x[3])):
                         track_id, cls, conf, y_center, moisture = candidate

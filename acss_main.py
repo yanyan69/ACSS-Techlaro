@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-ACSS GUI Skeleton with Tabs (Modern Design + Frames + Log + About + Exit)
-Integrated with process control, auto-start camera and model, object tracking, and FIFO sorting.
+ACSS GUI with Tabs, Process Control, YOLO Tracking, FIFO Sorting, and Servo Fixes.
+AS7263 light disabled, IR logging removed, fixed track mismatches and ignored copra.
 """
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import sys, threading, time
+from collections import deque  # For sort queue
 
 # Optional imports (graceful degradation)
 try:
@@ -42,9 +43,9 @@ CAM_PREVIEW_SIZE = (640, 480)
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
-YOLO_MODEL_PATH = "my_model/my_model.pt"  # Custom model; use "yolov11n.pt" for lightweight testing
-TRACKER_PATH = "bytetrack.yaml"  # Assume available
-SORT_ZONE_Y = 200  # Top third of 480px frame for sorting
+YOLO_MODEL_PATH = "my_model/my_model.pt"  # Use "yolov11n.pt" for lightweight testing
+TRACKER_PATH = "bytetrack.yaml"  # Assume in project root
+SORT_ZONE_Y = 300  # Top ~60% of 480px frame for sorting
 # ---------------------------------------------------
 
 class ACSSGui:
@@ -100,6 +101,7 @@ class ACSSGui:
             'start_time': None,
             'end_time': None
         }
+        self.sort_queue = deque()  # Queue for pending sorts
 
         # Load YOLO if available
         if ULTRALYTICS_AVAILABLE:
@@ -128,10 +130,9 @@ class ACSSGui:
         frm = tk.Frame(self.home_tab)
         frm.pack(fill="both", expand=True, padx=8, pady=8)
         frm.rowconfigure(0, weight=1)
-        frm.columnconfigure(0, weight=3)  # Left side wider for camera
-        frm.columnconfigure(1, weight=2)  # Right side narrower for log
+        frm.columnconfigure(0, weight=3)
+        frm.columnconfigure(1, weight=2)
 
-        # Left side: Camera + Button
         left_frame = tk.Frame(frm)
         left_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         left_frame.rowconfigure(0, weight=1)
@@ -152,7 +153,6 @@ class ACSSGui:
         if not PICAMERA2_AVAILABLE or not ULTRALYTICS_AVAILABLE:
             self.process_btn.config(state='disabled')
 
-        # Right side: Log (adjusted size, with word wrap)
         log_frame = tk.LabelFrame(frm, text="Log")
         log_frame.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
         self.log = scrolledtext.ScrolledText(log_frame, state='disabled', wrap='word', height=20, width=40)
@@ -250,11 +250,11 @@ class ACSSGui:
         about_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         tk.Label(about_frame,
-                text="Automated Copra Segregation System\n\n"
-                     "Version: 1.0\n"
-                     "Developed for Practice and Design 2\n"
-                     "Marinduque State University, 2025",
-                font=("Arial", 12), justify="center").pack(pady=40)
+                 text="Automated Copra Segregation System\n\n"
+                      "Version: 1.0\n"
+                      "Developed for Practice and Design 2\n"
+                      "Marinduque State University, 2025",
+                 font=("Arial", 12), justify="center").pack(pady=40)
 
     # ------------------- EXIT ---------------------
     def _build_exit_tab(self):
@@ -265,7 +265,7 @@ class ACSSGui:
         exit_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         tk.Label(exit_frame, text="Click the button below to close the program.",
-                font=("Arial", 12)).pack(pady=20)
+                 font=("Arial", 12)).pack(pady=20)
 
         tk.Button(exit_frame, text="Exit Program", fg="white", bg="red",
                   font=("Arial", 14, "bold"), width=20,
@@ -279,6 +279,7 @@ class ACSSGui:
     def open_serial(self):
         if not SERIAL_AVAILABLE:
             self._log_message("pyserial not available.")
+            self.process_btn.config(state='disabled')
             return
         if self.serial and self.serial.is_open:
             self._log_message("Serial already open.")
@@ -289,8 +290,11 @@ class ACSSGui:
             self.serial_reader_thread_obj = threading.Thread(target=self.serial_reader_thread, daemon=True)
             self.serial_reader_thread_obj.start()
             self._log_message("Serial reader thread started.")
+            # Disable AS7263 lights
+            self.send_cmd("AS_OFF")
         except Exception as e:
             self._log_message(f"Failed to open serial: {e}")
+            self.process_btn.config(state='disabled')
 
     def close_serial(self):
         try:
@@ -307,7 +311,7 @@ class ACSSGui:
         try:
             with self.serial_lock:
                 self.serial.write((text + "\n").encode())
-                self.serial.flush()  # Ensure immediate send
+                self.serial.flush()
             self._log_message(f"TX -> {text}")
         except Exception as e:
             self._log_message(f"Serial write failed: {e}")
@@ -316,8 +320,34 @@ class ACSSGui:
         if char not in ('L', 'C', 'R'):
             self._log_message(f"Invalid sort direction: {char}")
             return
-        self._log_message(f"Sending SORT,{char}")
-        self.send_cmd(f"SORT,{char}")
+        self.sort_queue.append(char)
+        self._process_sort_queue()
+
+    def _process_sort_queue(self):
+        if not self.sort_queue or time.time() < self.sort_cooldown:
+            return
+        char = self.sort_queue.popleft()
+        try:
+            cmd = f"SORT,{char}"
+            self._log_message(f"Sending SORT,{char}")
+            with self.serial_lock:
+                self.serial.reset_input_buffer()
+                self.serial.write((cmd + "\n").encode())
+                self.serial.flush()
+                t0 = time.time()
+                got_ack = False
+                while time.time() - t0 < 1.0:
+                    line = self.serial.readline().decode(errors='ignore').strip()
+                    if line == "ACK":
+                        self._log_message("RX <- ACK for SORT")
+                        got_ack = True
+                        break
+                if not got_ack:
+                    self._log_message(f"No ACK for SORT,{char}")
+                    self.sort_queue.append(char)  # Re-queue if no ACK
+        except Exception as e:
+            self._log_message(f"Sort failed: {e}")
+            self.sort_queue.append(char)  # Re-queue on failure
 
     def serial_reader_thread(self):
         self._log_message("Serial reader started.")
@@ -326,13 +356,12 @@ class ACSSGui:
                 line = self.serial.readline().decode(errors='ignore').strip()
                 if not line:
                     continue
-                # Only log expected messages (AS: or ACK); ignore others (e.g., IR or noise)
                 if line.startswith("AS:"):
                     vals = line[3:].split(",")
                     self._log_message(f"RX <- AS values: {vals}")
                 elif line == "ACK":
                     self._log_message("RX <- ACK from Arduino")
-                # Silently ignore unexpected messages to prevent log spam
+                # Silently ignore other messages
             except Exception as e:
                 self._log_message(f"Serial reader exception: {e}")
                 time.sleep(0.1)
@@ -341,15 +370,18 @@ class ACSSGui:
     def start_process(self):
         self.stats['start_time'] = time.time()
         self.stats['end_time'] = None
+        # self.send_cmd("MOTOR_SPEED,80")  # Uncomment if Arduino supports PWM
         self.send_cmd("MOTOR,ON")
         self.sort_cooldown = time.time()
         self.sorted_tracks.clear()
         self.track_start_times.clear()
+        self.sort_queue.clear()
         self.root.after(0, self.update_stats)
 
     def stop_process(self):
         self.send_cmd("MOTOR,OFF")
         self.stats['end_time'] = time.time()
+        self.sort_queue.clear()
         self.root.after(0, self.update_stats)
 
     # ---------- Camera Methods ----------
@@ -423,17 +455,20 @@ class ACSSGui:
 
                     current_time = time.time()
                     candidates = []
+                    untracked_candidates = []
                     for i in range(len(cls_tensor)):
                         track_id = track_ids[i] if i < len(track_ids) else -1
-                        if track_id not in self.sorted_tracks and track_id != -1:
-                            y_center = (boxes[i, 1] + boxes[i, 3]) / 2
-                            if y_center < SORT_ZONE_Y:  # Sort zone: top third
-                                cls = cls_tensor[i]
-                                conf = conf_tensor[i]
-                                if conf > 0.25:
-                                    if track_id not in self.track_start_times:
-                                        self.track_start_times[track_id] = current_time
-                                    candidates.append((track_id, cls, conf, y_center))
+                        y_center = (boxes[i, 1] + boxes[i, 3]) / 2
+                        cls = cls_tensor[i]
+                        conf = conf_tensor[i]
+                        if conf > 0.25 and y_center < SORT_ZONE_Y:
+                            if track_id != -1 and track_id not in self.sorted_tracks:
+                                if track_id not in self.track_start_times:
+                                    self.track_start_times[track_id] = current_time
+                                candidates.append((track_id, cls, conf, y_center))
+                            elif track_id == -1:
+                                self._log_message(f"Untracked detection (class {cls}, conf {conf:.2f}, y={y_center:.1f})")
+                                untracked_candidates.append((cls, conf, y_center))
 
                     if candidates:
                         candidates.sort(key=lambda x: (self.track_start_times[x[0]], x[3]))
@@ -446,10 +481,21 @@ class ACSSGui:
                         self.stats['total'] += 1
                         self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, track {track_id}, y={y_center:.1f}) to {sort_char}")
                         self.sorted_tracks.add(track_id)
-                        self.sort_cooldown = current_time + 1.5
+                        self.sort_cooldown = current_time + 0.5  # Faster for 95 RPM
+                        self.root.after(0, self.update_stats)
+                    elif untracked_candidates:
+                        untracked_candidates.sort(key=lambda x: x[2])  # Sort by y_center
+                        cls, conf, y_center = untracked_candidates[0]
+                        sort_char = self.class_to_sort.get(cls, 'C')
+                        self.send_sort(sort_char)
+                        category = self.category_map.get(cls, 'Standard')
+                        self.stats[category] += 1
+                        self.stats['total'] += 1
+                        self._log_message(f"Sorted untracked {category} (class {cls}, conf {conf:.2f}, y={y_center:.1f}) to {sort_char}")
+                        self.sort_cooldown = current_time + 0.5
                         self.root.after(0, self.update_stats)
 
-                    if current_time - self.last_cleanup > 10.0:
+                    if current_time - self.last_cleanup > 5.0:
                         if len(results[0].boxes) == 0:
                             self.sorted_tracks.clear()
                             self.track_start_times.clear()
@@ -460,7 +506,7 @@ class ACSSGui:
                     fps = 10 / (time.time() - fps_time)
                     fps_time = time.time()
                     cv2.putText(frame, f"FPS: {fps:.1f}", (10, 25),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     frame_counter = 0
 
                 display_frame = cv2.resize(frame, CAM_PREVIEW_SIZE)
@@ -473,7 +519,7 @@ class ACSSGui:
 
     def update_canvas_with_frame(self, bgr_frame):
         try:
-            rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGRA2RGB)
+            rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
             if PIL_AVAILABLE:
                 img = Image.fromarray(rgb)
                 imgtk = ImageTk.PhotoImage(img)
@@ -500,6 +546,7 @@ class ACSSGui:
                 self.serial.close()
         except:
             pass
+        self._log_message("Application closed.")
         self.root.destroy()
 
 

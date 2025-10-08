@@ -41,12 +41,11 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (320, 240)  # Try (320, 240) if PDAF errors persist
+CAM_PREVIEW_SIZE = (640, 480)  # Reverted for higher resolution
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Use "yolov11n.pt" for lightweight testing
-TRACKER_PATH = "bytetrack.yaml"  # Assume in project root
 SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
 FALLBACK_ZONE_Y = 400  # Secondary zone for untracked copra
 # ---------------------------------------------------
@@ -91,9 +90,7 @@ class ACSSGui:
         self.latest_frame = None
         self.serial_reader_thread_obj = None
         self.sort_cooldown = 0
-        self.sorted_tracks = set()
-        self.track_start_times = {}  # FIFO: Track ID -> creation time
-        self.last_cleanup = time.time()
+        self.as_led_cooldown = 0  # Cooldown for AS7263 LED
         self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
         self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
         self.stats = {
@@ -401,8 +398,7 @@ class ACSSGui:
         self.stats['end_time'] = None
         self.send_cmd("MOTOR,ON")  # Start conveyor at fixed speed (255 PWM)
         self.sort_cooldown = time.time()
-        self.sorted_tracks.clear()
-        self.track_start_times.clear()
+        self.as_led_cooldown = time.time()  # Reset LED cooldown
         self.sort_queue.clear()
         self.serial_error_logged = False
         self.root.after(0, self.update_stats)
@@ -412,6 +408,7 @@ class ACSSGui:
         self.stats['end_time'] = time.time()
         self.sort_queue.clear()
         self.serial_error_logged = False
+        self.as_led_cooldown = time.time()  # Reset LED cooldown
         self.root.after(0, self.update_stats)
 
     # ---------- Camera Methods ----------
@@ -467,23 +464,13 @@ class ACSSGui:
                 results = None
                 if self.yolo:
                     yolo_start = time.time()
-                    if self.process_running:
-                        self.send_cmd("REQ_AS")  # Request AS7263 reading
-                        results = self.yolo.track(
-                            source=frame,
-                            persist=True,
-                            tracker=TRACKER_PATH,
-                            conf=0.3,
-                            max_det=3,
-                            verbose=False
-                        )
-                    else:
-                        results = self.yolo.predict(
-                            source=frame,
-                            conf=0.3,
-                            max_det=3,
-                            verbose=False
-                        )
+                    self.send_cmd("REQ_AS")  # Request AS7263 reading
+                    results = self.yolo.predict(
+                        source=frame,
+                        conf=0.3,
+                        max_det=3,
+                        verbose=False
+                    )
                     yolo_time = time.time() - yolo_start
                     if yolo_time > 0.1:
                         self._log_message(f"YOLO processing time: {yolo_time:.3f}s")
@@ -491,23 +478,16 @@ class ACSSGui:
                 # Process sorting if results exist and AS7263 validates
                 as7263_valid = self.as7263_data is not None and (current_time - self.as7263_timestamp) < 0.5
                 if self.process_running and results and results[0].boxes and len(results[0].boxes) > 0 and time.time() > self.sort_cooldown and as7263_valid:
-                    track_ids = results[0].boxes.id.cpu().numpy().astype(int) if results[0].boxes.id is not None else []
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                     conf_tensor = results[0].boxes.conf.cpu().numpy()
 
-                    if len(track_ids) < len(cls_tensor):
-                        self._log_message(f"Warning: Track ID mismatch ({len(track_ids)} IDs vs {len(cls_tensor)} boxes, boxes={boxes.tolist()})")
-
-                    current_time = time.time()
                     candidates = []
-                    untracked_candidates = []
                     for i in range(len(cls_tensor)):
-                        track_id = track_ids[i] if i < len(track_ids) else -1
                         y_center = (boxes[i, 1] + boxes[i, 3]) / 2
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
-                        if conf > 0.3:
+                        if conf > 0.3 and y_center < FALLBACK_ZONE_Y:
                             # Estimate moisture
                             if cls == 0:  # Raw
                                 moisture = 7.1 + (conf - 0.3) * (8.0 - 7.1) / 0.7
@@ -516,47 +496,21 @@ class ACSSGui:
                             else:  # Overcooked
                                 moisture = 5.0 + (conf - 0.3) * (5.9 - 5.0) / 0.7
                             moisture = round(moisture, 1)
+                            candidates.append((cls, conf, y_center, moisture))
 
-                            if track_id != -1 and track_id not in self.sorted_tracks and y_center < SORT_ZONE_Y:
-                                if track_id not in self.track_start_times:
-                                    self.track_start_times[track_id] = current_time
-                                candidates.append((track_id, cls, conf, y_center, moisture))
-                            elif y_center < FALLBACK_ZONE_Y:
-                                self._log_message(f"Untracked detection (class {cls}, conf {conf:.2f}, y={y_center:.1f}, moisture {moisture}%)")
-                                untracked_candidates.append((cls, conf, y_center, moisture))
-
-                    if candidates or untracked_candidates:
-                        self.send_cmd("AS_IND_ON")  # Turn on AS7263 LED for 1s
-
-                    for candidate in sorted(candidates, key=lambda x: (self.track_start_times[x[0]], x[3])):
-                        track_id, cls, conf, y_center, moisture = candidate
+                    for cls, conf, y_center, moisture in sorted(candidates, key=lambda x: x[2]):
                         sort_char = self.class_to_sort.get(cls, 'C')
                         self.send_sort(sort_char)
                         category = self.category_map.get(cls, 'Standard')
                         self.stats[category] += 1
                         self.stats['total'] += 1
                         self.moisture_sums[category] += moisture
-                        self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, track {track_id}, y={y_center:.1f}, moisture {moisture}%) to {sort_char}")
-                        self.sorted_tracks.add(track_id)
+                        self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, y={y_center:.1f}, moisture {moisture}%) to {sort_char}")
+                        if time.time() > self.as_led_cooldown:
+                            self.send_cmd("AS_IND_ON")  # Turn on AS7263 LED for 1s
+                            self.as_led_cooldown = time.time() + 1.2
                         self.sort_cooldown = current_time + 0.3
                         self.root.after(0, self.update_stats)
-
-                    for cls, conf, y_center, moisture in sorted(untracked_candidates, key=lambda x: x[2]):
-                        sort_char = self.class_to_sort.get(cls, 'C')
-                        self.send_sort(sort_char)
-                        category = self.category_map.get(cls, 'Standard')
-                        self.stats[category] += 1
-                        self.stats['total'] += 1
-                        self.moisture_sums[category] += moisture
-                        self._log_message(f"Sorted untracked {category} (class {cls}, conf {conf:.2f}, y={y_center:.1f}, moisture {moisture}%) to {sort_char}")
-                        self.sort_cooldown = current_time + 0.3
-                        self.root.after(0, self.update_stats)
-
-                    if current_time - self.last_cleanup > 5.0:
-                        if len(results[0].boxes) == 0:
-                            self.sorted_tracks.clear()
-                            self.track_start_times.clear()
-                        self.last_cleanup = current_time
 
                 # Update display every other frame
                 display_skip = (display_skip + 1) % 2
@@ -569,7 +523,7 @@ class ACSSGui:
                 if frame_counter >= 50 and current_time - last_fps_log > 5.0:
                     fps = frame_counter / (current_time - fps_time)
                     self._log_message(f"FPS: {fps:.1f}")
-                    fps_time = current_time
+                    fps_time = time.time()
                     frame_counter = 0
 
                 time.sleep(0.01)

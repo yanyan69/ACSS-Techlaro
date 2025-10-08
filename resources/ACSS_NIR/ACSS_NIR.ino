@@ -164,7 +164,7 @@ void loop() {
         Serial.print(sensor.getCalibratedR(), 2); Serial.print(",");
         Serial.print(sensor.getCalibratedS(), 2); Serial.print(",");
         Serial.print(sensor.getCalibratedT(), 2); Serial.print(",");
-        Serial.print(sensor.getCalibratedU, 2); Serial.print(",");
+        Serial.print(sensor.getCalibratedU(), 2); Serial.print(",");
         Serial.print(sensor.getCalibratedV(), 2); Serial.print(",");
         Serial.println(sensor.getCalibratedW(), 2);
       }
@@ -208,7 +208,7 @@ void loop() {
           Serial.print(sensor.getCalibratedR(), 2); Serial.print(",");
           Serial.print(sensor.getCalibratedS(), 2); Serial.print(",");
           Serial.print(sensor.getCalibratedT(), 2); Serial.print(",");
-          Serial.print(sensor.getCalibratedU, 2); Serial.print(",");
+          Serial.print(sensor.getCalibratedU(), 2); Serial.print(",");
           Serial.print(sensor.getCalibratedV(), 2); Serial.print(",");
           Serial.println(sensor.getCalibratedW(), 2);
         }

@@ -42,20 +42,20 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution as requested
+CAM_PREVIEW_SIZE = (640, 480)
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
-SERIAL_BAUD = 9600
-YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
-SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
-FALLBACK_ZONE_Y = 400  # Secondary zone for detections
+SERIAL_BAUD = 115200  # Increased for stability
+YOLO_MODEL_PATH = "my_model/my_model.pt"
+SORT_ZONE_Y = 350
+FALLBACK_ZONE_Y = 400
 
-SORT_DELAY = 1.5  # Seconds from detection to servo actuation
-SERVO_CHUTE_CLEAR_TIME = 1  # Seconds for servo settle and chute clear
-POST_SORT_ADVANCE = 1  # Seconds to run conveyor post-sort to position next copra
-DROP_DELAY = 1  # Seconds from servo actuation to bin drop (for stats)
-AS_BULB_DELAY = 0.5  # Seconds for AS7263 bulb on/off simulation
-DETECTION_COOLDOWN = 1  # Seconds before allowing new detection
+SORT_DELAY = 2  # Seconds from detection to servo actuation
+SERVO_CHUTE_CLEAR_TIME = 1.5  # Seconds for servo settle and chute clear
+POST_SORT_ADVANCE = 1
+DROP_DELAY = 1
+AS_BULB_DELAY = 0.5
+DETECTION_COOLDOWN = 0.5  # Faster detection for throughput
 
 # ---------------------------------------------------
 
@@ -99,16 +99,13 @@ class ACSSGui:
         self.frame_lock = threading.Lock()
         self.latest_frame = None
         self.serial_reader_thread_obj = None
-        self.sort_queue = deque()  # Queue: {'detection_time', 'sort_char', 'category', 'moisture'}
+        self.sort_queue = deque()
         self.as_request_cooldown = 0
-        self.detection_cooldown = 0  # For 1s detection cooldown
-        self.serial_error_logged = False  # Prevent serial error spam
-        self.frame_drop_logged = False  # Prevent frame drop spam
-        self.yolo_log_suppressed = True  # Suppress YOLO time logs
+        self.detection_cooldown = 0
         self.as7263_data = None
         self.as7263_timestamp = 0
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
+        self.class_to_sort = {0: 'C', 1: 'R', 2: 'L'}  # Raw: center, Standard: right, Overcooked: left
         self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
         self.stats = {
             'Raw': 0,
@@ -118,6 +115,7 @@ class ACSSGui:
             'start_time': None,
             'end_time': None
         }
+        self.process_start_time = None  # For relative time logging
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -195,21 +193,14 @@ class ACSSGui:
             self.process_running = False
 
     def _log_message(self, msg):
-        # Suppress spammy logs
-        if ("Frame drop" in msg and self.frame_drop_logged) or \
-            ("Serial reader exception" in msg and self.serial_error_logged):
-            return
         ts = time.strftime("%H:%M:%S")
-        full_msg = f"[{ts}] {msg}"
+        relative_time = f"{time.time() - self.process_start_time:.3f}s" if self.process_start_time else "0.000s"
+        full_msg = f"[{ts} | T+{relative_time}] {msg}"
         self.log.config(state='normal')
         self.log.insert("end", full_msg + "\n")
         self.log.see("end")
         self.log.config(state='disabled')
-        # Set flags for suppressed logs
-        if "Frame drop" in msg:
-            self.frame_drop_logged = True
-        if "Serial reader exception" in msg:
-            self.serial_error_logged = True
+        print(full_msg)
 
     def _build_statistics_tab(self):
         frm = tk.Frame(self.statistics_tab)
@@ -334,50 +325,47 @@ class ACSSGui:
             print(f"Error closing serial: {e}")
 
     def send_cmd(self, text):
-        """Send any general command to Arduino with newline + flush"""
+        """Send command to Arduino with newline, flush, and small delay."""
         try:
             if not self.serial or not self.serial.is_open:
                 self._log_message(f"Serial not open — can't send: {text}")
-                print(f"Serial not open — can't send: {text}")
                 return
             full_cmd = (text.strip().upper() + "\n").encode('utf-8')
             with self.serial_lock:
                 self.serial.write(full_cmd)
                 self.serial.flush()
+                time.sleep(0.01)  # Prevent buffer overflow
+            self._log_message(f"Sent command: {text}")
         except Exception as e:
             self._log_message(f"Failed to send command '{text}': {e}")
-            print(f"Failed to send command '{text}': {e}")
 
     def send_sort(self, char):
-        """Send servo sort command (L, C, R)."""
+        """Send servo sort command (L, C, R) and wait for ACK."""
         try:
             char = char.strip().upper()
             if char not in ("L", "C", "R"):
                 self._log_message(f"Invalid servo command: {char}")
-                print(f"Invalid servo command: {char}")
                 return
             cmd = f"SORT,{char}"
             with self.serial_lock:
                 self.serial.write((cmd + "\n").encode())
                 self.serial.flush()
+                self._log_message(f"Sent sort command: {cmd}")
                 t0 = time.time()
                 got_ack = False
-                while time.time() - t0 < 1.5:
+                while time.time() - t0 < 2.0:  # Increased timeout
                     line = self.serial.readline().decode(errors='ignore').strip()
                     if line == "ACK":
+                        self._log_message(f"Received ACK for {cmd}")
                         got_ack = True
                         break
                 if not got_ack:
-                    self._log_message(f"No ACK for SORT,{char}")
-                    print(f"No ACK for SORT,{char}")
-                    # Don't requeue to avoid infinite loop; log and proceed
+                    self._log_message(f"No ACK for {cmd}")
         except Exception as e:
             self._log_message(f"Sort failed: {e}")
-            print(f"Sort failed: {e}")
 
     def serial_reader_thread(self):
         self._log_message("Serial reader started.")
-        print("Serial reader started.")
         try:
             while self.serial and self.serial.is_open and self.running:
                 try:
@@ -388,49 +376,40 @@ class ACSSGui:
                         vals = line[3:].split(",")
                         self.as7263_data = vals
                         self.as7263_timestamp = time.time()
+                        self._log_message(f"Received AS7263 data: {vals}")
                     elif line == "ACK":
-                        pass
+                        self._log_message("Received ACK")
+                    else:
+                        self._log_message(f"Serial data: {line}")
                 except Exception as e:
-                    if not self.serial_error_logged:
-                        self._log_message(f"Serial reader exception: {e}")
-                        print(f"Serial reader exception: {e}")
-                        self.serial_error_logged = True
+                    self._log_message(f"Serial reader exception: {e}")
                     time.sleep(0.2)
         except Exception as outer:
             self._log_message(f"Serial reader crashed: {outer}")
-            print(f"Serial reader crashed: {outer}")
 
     def start_process(self):
         try:
             if not (self.serial and self.serial.is_open):
                 self._log_message("Open serial first.")
-                print("Open serial first.")
                 return
             if not self.yolo:
                 self._log_message("YOLO model not loaded.")
-                print("YOLO model not loaded.")
                 return
             if self.process_running:
                 self._log_message("Process already running.")
-                print("Process already running.")
                 return
+            self.process_start_time = time.time()
             self.send_cmd("MOTOR,ON")
             self.stats['start_time'] = time.time()
             self.stats['end_time'] = None
             self.sort_queue.clear()
-            self.serial_error_logged = False
-            self.frame_drop_logged = False
             self.as_request_cooldown = time.time()
             self.detection_cooldown = time.time()
-            # Start sort processor thread
             self.sort_processor_thread = threading.Thread(target=self.sort_processor_loop, daemon=True)
             self.sort_processor_thread.start()
             self._log_message("Process started: Motor ON, detection active.")
-            print("Process started: Motor ON, detection active.")
-            self.root.after(0, self.update_stats)
         except Exception as e:
             self._log_message(f"Start process error: {e}")
-            print(f"Start process error: {e}")
 
     def stop_process(self):
         try:
@@ -458,47 +437,48 @@ class ACSSGui:
             try:
                 if self.sort_queue and time.time() >= self.sort_queue[0]['detection_time'] + SORT_DELAY:
                     item = self.sort_queue.popleft()
-                    self.send_cmd("MOTOR,OFF")  # Stop exactly at 2s (SORT_DELAY)
-                    self.send_sort(item['sort_char'])  # Rotate servo
-                    time.sleep(SERVO_CHUTE_CLEAR_TIME)  # 1.5s for servo and chute clear
-                    self.send_cmd("MOTOR,ON")  # Move conveyor to drop copra
-                    time.sleep(POST_SORT_ADVANCE)  # 1s to advance into chute
-                    # Wait for next copra's SORT_DELAY if queued
+                    self._log_message(f"Dequeued {item['category']} (moisture {item['moisture']}%) for sorting")
+                    self.send_cmd("MOTOR,OFF")
+                    self.send_sort(item['sort_char'])
+                    time.sleep(SERVO_CHUTE_CLEAR_TIME)
+                    self.send_cmd("MOTOR,ON")
+                    time.sleep(POST_SORT_ADVANCE)
                     if self.sort_queue:
                         next_item_time = self.sort_queue[0]['detection_time'] + SORT_DELAY
                         current_time = time.time()
                         if current_time < next_item_time:
                             remaining_delay = next_item_time - current_time
+                            self._log_message(f"Waiting {remaining_delay:.3f}s for next copra's SORT_DELAY")
                             self.send_cmd("MOTOR,OFF")
-                            time.sleep(remaining_delay)  # Wait for next copra's 2s
-                    # Schedule stats update
+                            time.sleep(remaining_delay)
+                    self._log_message(f"Scheduling stats update for {item['category']}")
                     threading.Timer(DROP_DELAY, lambda: self._update_stats_after_drop(item['category'], item['moisture'])).start()
-                time.sleep(0.01)  # Tight loop for precise timing
+                time.sleep(0.01)
             except Exception as e:
                 self._log_message(f"Sort processor error: {e}")
-                print(f"Sort processor error: {e}")
             
     def _update_stats_after_drop(self, category, moisture):
         try:
             self.stats[category] += 1
             self.stats['total'] += 1
             self.moisture_sums[category] += moisture
+            self._log_message(f"Stats updated: {category} +1, moisture {moisture}%")
             self.root.after(0, self.update_stats)
         except Exception as e:
-            self._log_message(f"Stats update after drop error: {e}")
-            print(f"Stats update after drop error: {e}")
+            self._log_message(f"Stats update error: {e}")
 
     def _simulate_as7263_measurement(self):
         """Simulate AS7263 measurement with bulb toggles."""
         try:
+            self._log_message("Starting AS7263 simulation")
             self.send_cmd("AS_BULB_ON")
             time.sleep(AS_BULB_DELAY)
             self.send_cmd("REQ_AS")
             time.sleep(AS_BULB_DELAY)
             self.send_cmd("AS_BULB_OFF")
+            self._log_message("AS7263 simulation completed")
         except Exception as e:
             self._log_message(f"AS7263 simulation error: {e}")
-            print(f"AS7263 simulation error: {e}")
 
     def start_camera(self):
         if self.camera_running:
@@ -555,34 +535,27 @@ class ACSSGui:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
                 current_time = time.time()
-                # Suppress frame drop logs
                 if current_time - last_frame_time > 0.2:
-                    if not self.frame_drop_logged:
-                        self._log_message(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
-                        print(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
-                        self.frame_drop_logged = True
+                    self._log_message(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
                 last_frame_time = current_time
 
                 results = None
                 if self.yolo and current_time > self.detection_cooldown:
-                    yolo_start = time.time()
                     results = self.yolo.predict(
                         source=frame,
                         conf=0.3,
-                        max_det=3,
+                        max_det=1,  # Reduced for CPU efficiency
                         verbose=False
                     )
-                    yolo_time = time.time() - yolo_start
-                    # Suppress YOLO time log entirely
+                    self._log_message("YOLO processed frame")
 
                 has_detection = results and results[0].boxes and len(results[0].boxes) > 0
 
-                # AS7263 simulation only on detection
                 if has_detection and current_time > self.as_request_cooldown:
                     threading.Thread(target=self._simulate_as7263_measurement, daemon=True).start()
                     self.as_request_cooldown = current_time + 1
+                    self._log_message("Started AS7263 simulation thread")
 
-                # Process sorting
                 as7263_valid = self.as7263_data is not None and (current_time - self.as7263_timestamp) < 0.5
                 if self.process_running and has_detection and current_time > self.detection_cooldown and as7263_valid:
                     boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -594,9 +567,8 @@ class ACSSGui:
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
                         if conf > 0.3 and y_center < FALLBACK_ZONE_Y:
-                            # Adjusted moisture ranges
                             if cls == 0:  # Raw
-                                moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
+                                moisture = 7.1 + (conf - 0.3) * (20.0 - 7.1) / 0.7  # Max 20%
                             elif cls == 1:  # Standard
                                 moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
                             else:  # Overcooked or unknown
@@ -606,10 +578,10 @@ class ACSSGui:
                             candidates.append((cls, conf, y_center, moisture))
 
                     if candidates:
-                        candidates.sort(key=lambda x: x[2])  # Lowest y first
+                        candidates.sort(key=lambda x: x[2])
                         leading = candidates[0]
                         cls, conf, y_center, moisture = leading
-                        sort_char = self.class_to_sort.get(cls, 'R')
+                        sort_char = self.class_to_sort.get(cls, 'L')
                         category = self.category_map.get(cls, 'Overcooked')
                         self.sort_queue.append({
                             'detection_time': current_time,
@@ -617,11 +589,10 @@ class ACSSGui:
                             'category': category,
                             'moisture': moisture
                         })
-                        self._log_message(f"Queued {category} for sorting (conf {conf:.2f}, moisture {moisture}%)")
+                        self._log_message(f"Detected {category} (conf {conf:.2f}, moisture {moisture}%, sort {sort_char})")
                         self.detection_cooldown = current_time + DETECTION_COOLDOWN
 
-                # Update display every other frame
-                display_skip = (display_skip + 1) % 2
+                display_skip = (display_skip + 1) % 3  # Skip more frames for display
                 if display_skip == 0:
                     display_frame = results[0].plot() if results and results[0].boxes else frame
                     display_frame = cv2.resize(display_frame, CAM_PREVIEW_SIZE)
@@ -631,15 +602,13 @@ class ACSSGui:
                 if frame_counter >= 50 and current_time - last_fps_log > 5.0:
                     fps = frame_counter / (current_time - fps_time)
                     self._log_message(f"FPS: {fps:.1f}")
-                    print(f"FPS: {fps:.1f}")
                     fps_time = time.time()
                     frame_counter = 0
+                    last_fps_log = current_time
 
                 time.sleep(0.01)
             except Exception as e:
                 self._log_message(f"Camera loop error: {e}")
-                print(f"Camera loop error: {e}")
-                time.sleep(0.2)
 
     def update_canvas_with_frame(self, bgr_frame):
         try:

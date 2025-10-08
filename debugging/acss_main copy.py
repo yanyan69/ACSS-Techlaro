@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ACSS GUI Skeleton with Tabs (Modern Design + Frames + Log + About + Exit)
-Integrated with process control, auto-start camera and model, object tracking, and FIFO sorting.
+Integrated with process control, auto-start camera and model.
 """
 
 import tkinter as tk
@@ -11,10 +11,8 @@ import sys, threading, time
 # Optional imports (graceful degradation)
 try:
     import serial
-    SERIAL_AVAILABLE = True
 except:
     serial = None
-    SERIAL_AVAILABLE = False
 try:
     import cv2
     import numpy as np
@@ -42,9 +40,8 @@ CAM_PREVIEW_SIZE = (640, 480)
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
-YOLO_MODEL_PATH = "my_model/my_model.pt"  # Switched to YOLOv11n for testing (auto-downloads)
+YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"  # Assume available
-SORT_ZONE_Y = 200  # Top third of 480px frame for sorting
 # ---------------------------------------------------
 
 class ACSSGui:
@@ -57,7 +54,7 @@ class ACSSGui:
         notebook = ttk.Notebook(root)
         notebook.pack(fill="both", expand=True)
 
-        # Create tabs
+        # Create tabs (remove settings)
         self.home_tab = ttk.Frame(notebook)
         self.statistics_tab = ttk.Frame(notebook)
         self.about_tab = ttk.Frame(notebook)
@@ -88,7 +85,6 @@ class ACSSGui:
         self.serial_reader_thread_obj = None
         self.sort_cooldown = 0
         self.sorted_tracks = set()
-        self.track_start_times = {}  # FIFO: Track ID -> creation time
         self.last_cleanup = time.time()
         self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
         self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
@@ -108,7 +104,7 @@ class ACSSGui:
                 self.yolo = YOLO(YOLO_MODEL_PATH)
                 self._log_message(f"YOLO model loaded: {YOLO_MODEL_PATH}")
             except Exception as ex:
-                self._log_message(f"YOLO load failed: {ex}")
+                self._log_message("YOLO load failed: " + str(ex))
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -116,12 +112,6 @@ class ACSSGui:
         self.open_serial()
         if PICAMERA2_AVAILABLE:
             self.start_camera()
-        else:
-            self.process_btn.config(state='disabled')
-
-        # Disable process button if no serial
-        if not SERIAL_AVAILABLE:
-            self.process_btn.config(state='disabled')
 
     # -------------------- HOME --------------------
     def _build_home_tab(self):
@@ -129,7 +119,7 @@ class ACSSGui:
         frm.pack(fill="both", expand=True, padx=8, pady=8)
         frm.rowconfigure(0, weight=1)
         frm.columnconfigure(0, weight=3)  # Left side wider for camera
-        frm.columnconfigure(1, weight=2)  # Right side narrower for log
+        frm.columnconfigure(1, weight=2)  # Right side narrower for log to fit
 
         # Left side: Camera + Button
         left_frame = tk.Frame(frm)
@@ -160,15 +150,6 @@ class ACSSGui:
 
     def _toggle_process(self):
         if not self.process_running:
-            if not (self.serial and self.serial.is_open):
-                self._log_message("Open serial first.")
-                return
-            if not self.yolo:
-                self._log_message("YOLO model not loaded.")
-                return
-            if not self.camera_running:
-                self._log_message("Camera not running.")
-                return
             self.process_btn.config(text="Stop Process", bg="red")
             self._log_message("Process started.")
             self.start_process()
@@ -236,6 +217,7 @@ class ACSSGui:
         for cat in ["Standard", "Raw", "Overcooked"]:
             self.stat_pieces[cat].config(text=str(self.stats[cat]))
         self.total_pieces_label.config(text=str(self.stats['total']))
+        # Moisture remains 0.0% as no integration
         start_str = time.strftime("%H:%M:%S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
         end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
         self.start_time_label.config(text=start_str)
@@ -277,7 +259,7 @@ class ACSSGui:
 
     # ---------- Serial Methods ----------
     def open_serial(self):
-        if not SERIAL_AVAILABLE:
+        if serial is None:
             self._log_message("pyserial not available.")
             return
         if self.serial and self.serial.is_open:
@@ -290,7 +272,7 @@ class ACSSGui:
             self.serial_reader_thread_obj.start()
             self._log_message("Serial reader thread started.")
         except Exception as e:
-            self._log_message(f"Failed to open serial: {e}")
+            self._log_message("Failed to open serial: " + str(e))
 
     def close_serial(self):
         try:
@@ -298,18 +280,18 @@ class ACSSGui:
                 self.serial.close()
                 self._log_message("Serial closed.")
         except Exception as e:
-            self._log_message(f"Error closing serial: {e}")
+            self._log_message("Error closing serial: " + str(e))
 
     def send_cmd(self, text):
         if not self.serial or not self.serial.is_open:
-            self._log_message(f"Serial not open. Cannot send: {text}")
+            self._log_message("Serial not open. Cannot send: " + text)
             return
         try:
             with self.serial_lock:
                 self.serial.write((text + "\n").encode())
             self._log_message(f"TX -> {text}")
         except Exception as e:
-            self._log_message(f"Serial write failed: {e}")
+            self._log_message("Serial write failed: " + str(e))
 
     def send_sort(self, char):
         if char not in ('L', 'C', 'R'):
@@ -325,25 +307,28 @@ class ACSSGui:
                 line = self.serial.readline().decode(errors='ignore').strip()
                 if not line:
                     continue
-                if line.startswith("AS:"):
-                    vals = line[3:].split(",")
-                    self._log_message(f"RX <- AS values: {vals}")
-                elif line == "ACK":
-                    self._log_message("RX <- ACK from Arduino")
-                else:
-                    self._log_message(f"RX <- {line}")
+                self._log_message(f"RX <- {line}")
             except Exception as e:
-                self._log_message(f"Serial reader exception: {e}")
+                self._log_message("Serial reader exception: " + str(e))
                 time.sleep(0.1)
 
     # ---------- Process Control ----------
     def start_process(self):
-        self.stats['start_time'] = time.time()
+        if not (self.serial and self.serial.is_open):
+            self._log_message("Open serial first.")
+            return
+        if not self.yolo:
+            self._log_message("YOLO model not loaded.")
+            return
+        if not self.camera_running:
+            self._log_message("Camera not running.")
+            return
+        if self.stats['start_time'] is None:
+            self.stats['start_time'] = time.time()
         self.stats['end_time'] = None
         self.send_cmd("MOTOR,ON")
         self.sort_cooldown = time.time()
         self.sorted_tracks.clear()
-        self.track_start_times.clear()
         self.root.after(0, self.update_stats)
 
     def stop_process(self):
@@ -368,7 +353,7 @@ class ACSSGui:
             self.camera_thread.start()
             self._log_message("Camera started.")
         except Exception as e:
-            self._log_message(f"Camera start failed: {e}")
+            self._log_message("Camera start failed: " + str(e))
 
     def stop_camera(self):
         try:
@@ -378,7 +363,7 @@ class ACSSGui:
                 self.picam2 = None
             self._log_message("Camera stopped.")
         except Exception as e:
-            self._log_message(f"Camera stop error: {e}")
+            self._log_message("Camera stop error: " + str(e))
 
     def camera_loop(self):
         frame_counter = 0
@@ -400,13 +385,13 @@ class ACSSGui:
                             verbose=False
                         )
                     else:
-                        results = self.yolo.predict(  # Fixed: explicit predict
+                        results = self.yolo(
                             source=frame,
                             conf=0.25,
                             max_det=5,
                             verbose=False
                         )
-                    if results and results[0].boxes is not None:  # Null check
+                    if results and results[0].boxes:
                         frame = results[0].plot()
 
                 if self.process_running and results and results[0].boxes and len(results[0].boxes) > 0 and time.time() > self.sort_cooldown:
@@ -415,24 +400,18 @@ class ACSSGui:
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                     conf_tensor = results[0].boxes.conf.cpu().numpy()
 
-                    current_time = time.time()
                     candidates = []
                     for i in range(len(cls_tensor)):
                         track_id = track_ids[i] if i < len(track_ids) else -1
                         if track_id not in self.sorted_tracks and track_id != -1:
                             y_center = (boxes[i, 1] + boxes[i, 3]) / 2
-                            if y_center < SORT_ZONE_Y:  # Sort zone: top third
-                                cls = cls_tensor[i]
-                                conf = conf_tensor[i]
-                                if conf > 0.25:
-                                    # Record track start time (FIFO)
-                                    if track_id not in self.track_start_times:
-                                        self.track_start_times[track_id] = current_time
-                                    candidates.append((track_id, cls, conf, y_center))
+                            cls = cls_tensor[i]
+                            conf = conf_tensor[i]
+                            if conf > 0.25:
+                                candidates.append((track_id, cls, conf, y_center))
 
                     if candidates:
-                        # FIFO: Sort by track creation time, tiebreak by y_center
-                        candidates.sort(key=lambda x: (self.track_start_times[x[0]], x[3]))
+                        candidates.sort(key=lambda x: x[3])
                         leading = candidates[0]
                         track_id, cls, conf, y_center = leading
                         sort_char = self.class_to_sort.get(cls, 'C')
@@ -440,16 +419,15 @@ class ACSSGui:
                         category = self.category_map.get(cls, 'Standard')
                         self.stats[category] += 1
                         self.stats['total'] += 1
-                        self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, track {track_id}, y={y_center:.1f}) to {sort_char}")
+                        self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, track {track_id}) to {sort_char}")
                         self.sorted_tracks.add(track_id)
-                        self.sort_cooldown = current_time + 1.5  # Reduced for fast conveyor
+                        self.sort_cooldown = time.time() + 2.0
                         self.root.after(0, self.update_stats)
 
-                    # Periodic cleanup of old tracks
+                    current_time = time.time()
                     if current_time - self.last_cleanup > 10.0:
                         if len(results[0].boxes) == 0:
                             self.sorted_tracks.clear()
-                            self.track_start_times.clear()
                         self.last_cleanup = current_time
 
                 frame_counter += 1
@@ -465,7 +443,7 @@ class ACSSGui:
 
                 time.sleep(1/30)
             except Exception as e:
-                self._log_message(f"Camera loop error: {e}")
+                self._log_message("Camera loop error: " + str(e))
                 time.sleep(0.2)
 
     def update_canvas_with_frame(self, bgr_frame):
@@ -480,7 +458,7 @@ class ACSSGui:
                 cv2.imshow("Camera Preview", bgr_frame)
                 cv2.waitKey(1)
         except Exception as e:
-            self._log_message(f"Display frame error: {e}")
+            self._log_message("Display frame error: " + str(e))
 
     # ---------- Shutdown ----------
     def on_close(self):

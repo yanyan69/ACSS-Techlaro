@@ -2,6 +2,7 @@
 """
 ACSS GUI with Tabs, Process Control, YOLO Tracking, FIFO Sorting, and Servo Fixes.
 AS7263 light disabled, IR logging removed, fixed track mismatches and ignored copra.
+Optimized for 95 RPM conveyor at 80% speed.
 """
 
 import tkinter as tk
@@ -45,7 +46,8 @@ SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Use "yolov11n.pt" for lightweight testing
 TRACKER_PATH = "bytetrack.yaml"  # Assume in project root
-SORT_ZONE_Y = 300  # Top ~60% of 480px frame for sorting
+SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
+FALLBACK_ZONE_Y = 400  # Secondary zone for untracked copra
 # ---------------------------------------------------
 
 class ACSSGui:
@@ -102,6 +104,7 @@ class ACSSGui:
             'end_time': None
         }
         self.sort_queue = deque()  # Queue for pending sorts
+        self.serial_error_logged = False  # Prevent serial error spam
 
         # Load YOLO if available
         if ULTRALYTICS_AVAILABLE:
@@ -239,7 +242,7 @@ class ACSSGui:
         start_str = time.strftime("%H:%M:%S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
         end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
         self.start_time_label.config(text=start_str)
-        self.end_time_label.config(text=end_str)
+        self.end_time_label.config(end_str)
 
     # ------------------- ABOUT --------------------
     def _build_about_tab(self):
@@ -290,7 +293,6 @@ class ACSSGui:
             self.serial_reader_thread_obj = threading.Thread(target=self.serial_reader_thread, daemon=True)
             self.serial_reader_thread_obj.start()
             self._log_message("Serial reader thread started.")
-            # Disable AS7263 lights
             self.send_cmd("AS_OFF")
         except Exception as e:
             self._log_message(f"Failed to open serial: {e}")
@@ -308,13 +310,18 @@ class ACSSGui:
         if not self.serial or not self.serial.is_open:
             self._log_message(f"Serial not open. Cannot send: {text}")
             return
-        try:
-            with self.serial_lock:
-                self.serial.write((text + "\n").encode())
-                self.serial.flush()
-            self._log_message(f"TX -> {text}")
-        except Exception as e:
-            self._log_message(f"Serial write failed: {e}")
+        for _ in range(2):  # Retry once on failure
+            try:
+                with self.serial_lock:
+                    self.serial.write((text + "\n").encode())
+                    self.serial.flush()
+                self._log_message(f"TX -> {text}")
+                return
+            except Exception as e:
+                if not self.serial_error_logged:
+                    self._log_message(f"Serial write failed: {e}")
+                    self.serial_error_logged = True
+                time.sleep(0.1)
 
     def send_sort(self, char):
         if char not in ('L', 'C', 'R'):
@@ -331,12 +338,11 @@ class ACSSGui:
             cmd = f"SORT,{char}"
             self._log_message(f"Sending SORT,{char}")
             with self.serial_lock:
-                self.serial.reset_input_buffer()
                 self.serial.write((cmd + "\n").encode())
                 self.serial.flush()
                 t0 = time.time()
                 got_ack = False
-                while time.time() - t0 < 1.0:
+                while time.time() - t0 < 1.5:  # Increased timeout
                     line = self.serial.readline().decode(errors='ignore').strip()
                     if line == "ACK":
                         self._log_message("RX <- ACK for SORT")
@@ -344,10 +350,12 @@ class ACSSGui:
                         break
                 if not got_ack:
                     self._log_message(f"No ACK for SORT,{char}")
-                    self.sort_queue.append(char)  # Re-queue if no ACK
+                    self.sort_queue.append(char)  # Re-queue
         except Exception as e:
-            self._log_message(f"Sort failed: {e}")
-            self.sort_queue.append(char)  # Re-queue on failure
+            if not self.serial_error_logged:
+                self._log_message(f"Sort failed: {e}")
+                self.serial_error_logged = True
+            self.sort_queue.append(char)  # Re-queue
 
     def serial_reader_thread(self):
         self._log_message("Serial reader started.")
@@ -363,25 +371,29 @@ class ACSSGui:
                     self._log_message("RX <- ACK from Arduino")
                 # Silently ignore other messages
             except Exception as e:
-                self._log_message(f"Serial reader exception: {e}")
+                if not self.serial_error_logged:
+                    self._log_message(f"Serial reader exception: {e}")
+                    self.serial_error_logged = True
                 time.sleep(0.1)
 
     # ---------- Process Control ----------
     def start_process(self):
         self.stats['start_time'] = time.time()
         self.stats['end_time'] = None
-        # self.send_cmd("MOTOR_SPEED,80")  # Uncomment if Arduino supports PWM
+        self.send_cmd("MOTOR_SPEED,80")  # Set 80% speed (adjust if not supported)
         self.send_cmd("MOTOR,ON")
         self.sort_cooldown = time.time()
         self.sorted_tracks.clear()
         self.track_start_times.clear()
         self.sort_queue.clear()
+        self.serial_error_logged = False
         self.root.after(0, self.update_stats)
 
     def stop_process(self):
         self.send_cmd("MOTOR,OFF")
         self.stats['end_time'] = time.time()
         self.sort_queue.clear()
+        self.serial_error_logged = False
         self.root.after(0, self.update_stats)
 
     # ---------- Camera Methods ----------
@@ -451,7 +463,7 @@ class ACSSGui:
                     conf_tensor = results[0].boxes.conf.cpu().numpy()
 
                     if len(track_ids) < len(cls_tensor):
-                        self._log_message(f"Warning: Track ID mismatch ({len(track_ids)} IDs vs {len(cls_tensor)} boxes)")
+                        self._log_message(f"Warning: Track ID mismatch ({len(track_ids)} IDs vs {len(cls_tensor)} boxes, boxes={boxes.tolist()})")
 
                     current_time = time.time()
                     candidates = []
@@ -461,19 +473,18 @@ class ACSSGui:
                         y_center = (boxes[i, 1] + boxes[i, 3]) / 2
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
-                        if conf > 0.25 and y_center < SORT_ZONE_Y:
-                            if track_id != -1 and track_id not in self.sorted_tracks:
+                        if conf > 0.25:
+                            if track_id != -1 and track_id not in self.sorted_tracks and y_center < SORT_ZONE_Y:
                                 if track_id not in self.track_start_times:
                                     self.track_start_times[track_id] = current_time
                                 candidates.append((track_id, cls, conf, y_center))
-                            elif track_id == -1:
+                            elif y_center < FALLBACK_ZONE_Y:
                                 self._log_message(f"Untracked detection (class {cls}, conf {conf:.2f}, y={y_center:.1f})")
                                 untracked_candidates.append((cls, conf, y_center))
 
-                    if candidates:
-                        candidates.sort(key=lambda x: (self.track_start_times[x[0]], x[3]))
-                        leading = candidates[0]
-                        track_id, cls, conf, y_center = leading
+                    # Sort all candidates in one cycle
+                    for candidate in sorted(candidates, key=lambda x: (self.track_start_times[x[0]], x[3])):
+                        track_id, cls, conf, y_center = candidate
                         sort_char = self.class_to_sort.get(cls, 'C')
                         self.send_sort(sort_char)
                         category = self.category_map.get(cls, 'Standard')
@@ -481,18 +492,18 @@ class ACSSGui:
                         self.stats['total'] += 1
                         self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, track {track_id}, y={y_center:.1f}) to {sort_char}")
                         self.sorted_tracks.add(track_id)
-                        self.sort_cooldown = current_time + 0.5  # Faster for 95 RPM
+                        self.sort_cooldown = current_time + 0.3  # Faster for 95 RPM
                         self.root.after(0, self.update_stats)
-                    elif untracked_candidates:
-                        untracked_candidates.sort(key=lambda x: x[2])  # Sort by y_center
-                        cls, conf, y_center = untracked_candidates[0]
+
+                    # Fallback for untracked detections
+                    for cls, conf, y_center in sorted(untracked_candidates, key=lambda x: x[2]):
                         sort_char = self.class_to_sort.get(cls, 'C')
                         self.send_sort(sort_char)
                         category = self.category_map.get(cls, 'Standard')
                         self.stats[category] += 1
                         self.stats['total'] += 1
                         self._log_message(f"Sorted untracked {category} (class {cls}, conf {conf:.2f}, y={y_center:.1f}) to {sort_char}")
-                        self.sort_cooldown = current_time + 0.5
+                        self.sort_cooldown = current_time + 0.3
                         self.root.after(0, self.update_stats)
 
                     if current_time - self.last_cleanup > 5.0:
@@ -504,9 +515,8 @@ class ACSSGui:
                 frame_counter += 1
                 if frame_counter >= 10:
                     fps = 10 / (time.time() - fps_time)
+                    self._log_message(f"FPS: {fps:.1f}")
                     fps_time = time.time()
-                    cv2.putText(frame, f"FPS: {fps:.1f}", (10, 25),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     frame_counter = 0
 
                 display_frame = cv2.resize(frame, CAM_PREVIEW_SIZE)

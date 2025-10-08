@@ -49,12 +49,14 @@ SERIAL_BAUD = 9600
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
 SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
 FALLBACK_ZONE_Y = 400  # Secondary zone for detections
+
 SORT_DELAY = 2  # Seconds from detection to servo actuation
-DROP_DELAY = 1  # Seconds from servo actuation to bin drop (for stats)
 SERVO_CHUTE_CLEAR_TIME = 1.5  # Seconds for servo settle and chute clear
+POST_SORT_ADVANCE = 1  # Seconds to run conveyor post-sort to position next copra
+DROP_DELAY = 1  # Seconds from servo actuation to bin drop (for stats)
 AS_BULB_DELAY = 0.5  # Seconds for AS7263 bulb on/off simulation
 DETECTION_COOLDOWN = 0.5  # Seconds before allowing new detection
-POST_SORT_ADVANCE = 1  # Seconds to run conveyor post-sort to position next copra
+
 # ---------------------------------------------------
 
 class ACSSGui:
@@ -451,31 +453,31 @@ class ACSSGui:
             print(f"Stop process error: {e}")
 
     def sort_processor_loop(self):
-        """Process sort queue with FIFO, motor pauses, and partial advance, waiting for next copra's SORT_DELAY."""
+        """Process sort queue with FIFO, stopping exactly at SORT_DELAY, servo rotation, and advance."""
         while self.running:
             try:
                 if self.sort_queue and time.time() >= self.sort_queue[0]['detection_time'] + SORT_DELAY:
                     item = self.sort_queue.popleft()
-                    self.send_cmd("MOTOR,OFF")
-                    self.send_sort(item['sort_char'])
-                    time.sleep(SERVO_CHUTE_CLEAR_TIME)  # Wait for servo and chute clear
-                    self.send_cmd("MOTOR,ON")
-                    time.sleep(POST_SORT_ADVANCE)  # Advance conveyor for next copra
-                    # Check if another item is queued and has remaining SORT_DELAY
+                    self.send_cmd("MOTOR,OFF")  # Stop exactly at 2s (SORT_DELAY)
+                    self.send_sort(item['sort_char'])  # Rotate servo
+                    time.sleep(SERVO_CHUTE_CLEAR_TIME)  # 1.5s for servo and chute clear
+                    self.send_cmd("MOTOR,ON")  # Move conveyor to drop copra
+                    time.sleep(POST_SORT_ADVANCE)  # 1s to advance into chute
+                    # Wait for next copra's SORT_DELAY if queued
                     if self.sort_queue:
                         next_item_time = self.sort_queue[0]['detection_time'] + SORT_DELAY
                         current_time = time.time()
                         if current_time < next_item_time:
                             remaining_delay = next_item_time - current_time
                             self.send_cmd("MOTOR,OFF")
-                            time.sleep(remaining_delay)  # Wait for next copra's SORT_DELAY
-                    # Schedule stats update after drop
+                            time.sleep(remaining_delay)  # Wait for next copra's 2s
+                    # Schedule stats update
                     threading.Timer(DROP_DELAY, lambda: self._update_stats_after_drop(item['category'], item['moisture'])).start()
-                time.sleep(0.1)
+                time.sleep(0.01)  # Tight loop for precise timing
             except Exception as e:
                 self._log_message(f"Sort processor error: {e}")
                 print(f"Sort processor error: {e}")
-
+            
     def _update_stats_after_drop(self, category, moisture):
         try:
             self.stats[category] += 1

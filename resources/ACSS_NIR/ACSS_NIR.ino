@@ -71,7 +71,7 @@ void setup() {
   if (!sensor.begin()) {
     Serial.println("AS7263 not detected. Check wiring!");
   } else {
-    sensor.enableBulb();
+    sensor.disableBulb();
     sensor.setBulbCurrent(3);
     sensor.disableIndicator();  // Start with LED off
   }

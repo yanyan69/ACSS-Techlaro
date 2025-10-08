@@ -329,7 +329,6 @@ class ACSSGui:
                 with self.serial_lock:
                     self.serial.write((text + "\n").encode())
                     self.serial.flush()
-                self._log_message(f"TX -> {text}")
                 return
             except Exception as e:
                 if not self.serial_error_logged:
@@ -350,7 +349,6 @@ class ACSSGui:
         char = self.sort_queue.popleft()
         try:
             cmd = f"SORT,{char}"
-            self._log_message(f"Sending SORT,{char}")
             with self.serial_lock:
                 self.serial.write((cmd + "\n").encode())
                 self.serial.flush()
@@ -359,7 +357,6 @@ class ACSSGui:
                 while time.time() - t0 < 1.5:
                     line = self.serial.readline().decode(errors='ignore').strip()
                     if line == "ACK":
-                        self._log_message("RX <- ACK for SORT")
                         got_ack = True
                         break
                 if not got_ack:
@@ -372,7 +369,6 @@ class ACSSGui:
             self.sort_queue.append(char)
 
     def serial_reader_thread(self):
-        self._log_message("Serial reader started.")
         while self.serial and self.serial.is_open and self.running:
             try:
                 line = self.serial.readline().decode(errors='ignore').strip()
@@ -382,9 +378,8 @@ class ACSSGui:
                     vals = line[3:].split(",")
                     self.as7263_data = vals  # Store latest AS7263 reading
                     self.as7263_timestamp = time.time()
-                    self._log_message(f"RX <- AS values: {vals}")
                 elif line == "ACK":
-                    self._log_message("RX <- ACK from Arduino")
+                    pass  # Silently handle ACK
                 # Silently ignore other messages
             except Exception as e:
                 if not self.serial_error_logged:
@@ -473,7 +468,12 @@ class ACSSGui:
                     )
                     yolo_time = time.time() - yolo_start
                     if yolo_time > 0.1:
-                        self._log_message(f"YOLO processing time: {yolo_time:.3f}s")
+                        print(f"YOLO processing time: {yolo_time:.3f}s")  # Log to console
+
+                # Trigger AS7263 LED on detection
+                if results and results[0].boxes and len(results[0].boxes) > 0 and time.time() > self.as_led_cooldown:
+                    self.send_cmd("AS_IND_ON")  # Turn on AS7263 LED for 1s
+                    self.as_led_cooldown = time.time() + 1.2
 
                 # Process sorting if results exist and AS7263 validates
                 as7263_valid = self.as7263_data is not None and (current_time - self.as7263_timestamp) < 0.5
@@ -506,9 +506,6 @@ class ACSSGui:
                         self.stats['total'] += 1
                         self.moisture_sums[category] += moisture
                         self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, y={y_center:.1f}, moisture {moisture}%) to {sort_char}")
-                        if time.time() > self.as_led_cooldown:
-                            self.send_cmd("AS_IND_ON")  # Turn on AS7263 LED for 1s
-                            self.as_led_cooldown = time.time() + 1.2
                         self.sort_cooldown = current_time + 0.3
                         self.root.after(0, self.update_stats)
 

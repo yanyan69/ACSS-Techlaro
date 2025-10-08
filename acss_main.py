@@ -50,11 +50,11 @@ YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
 SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
 FALLBACK_ZONE_Y = 400  # Secondary zone for detections
 SORT_DELAY = 1.75  # Seconds from detection to servo actuation
-DROP_DELAY = 1.5  # Seconds from servo actuation to bin drop (for stats)
-SERVO_CHUTE_CLEAR_TIME = 0  # Seconds for servo settle and chute clear
+DROP_DELAY = 0.75  # Seconds from servo actuation to bin drop (for stats)
+SERVO_CHUTE_CLEAR_TIME = 0.75  # Seconds for servo settle and chute clear
 AS_BULB_DELAY = 0.5  # Seconds for AS7263 bulb on/off simulation
-DETECTION_COOLDOWN = 0.75  # Seconds before allowing new detection
-POST_SORT_ADVANCE = 0.5  # Seconds to run conveyor post-sort to position next copra
+DETECTION_COOLDOWN = 1  # Seconds before allowing new detection
+POST_SORT_ADVANCE = 1  # Seconds to run conveyor post-sort to position next copra
 # ---------------------------------------------------
 
 class ACSSGui:

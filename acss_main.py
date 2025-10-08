@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-ACSS GUI with Tabs, Process Control, and Servo Fixes.
+ACSS GUI with Tabs, Process Control, and Servo Fixes (Simplified).
 - Optimized for 95 RPM conveyor at 80% speed.
-- Uses motor/servo control with FIFO queue for multiple copra.
+- Reacts directly to camera readings with 2s delay to servo, motor runs continuously.
+- Suitable for controlled scenarios with copra processed one by one.
 - AS7263 bulb simulation with delays, no real data used.
 - Suppressed spammy logs, full screen, reset stats, unknown to Overcooked.
-- Queuing stops during conveyor pauses to avoid stacking, but model runs.
+- Updated for model classes: {0: 'overcooked-copra', 1: 'raw-copra', 2: 'standard-copra'}.
+- Sorting: Overcooked (L), Standard (C), Raw (R).
+- Moisture: Overcooked <6%, Standard 6-7%, Raw >7-14%.
+- Separate classification and moisture logs, FPS logs removed.
 """
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import sys, threading, time
-from collections import deque  # For sort queue
+from collections import deque  # Not used in simple version
 
 # Optional imports (graceful degradation)
 try:
@@ -51,9 +55,9 @@ YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
 SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
 FALLBACK_ZONE_Y = 450  # Secondary zone for detections
 
-SORT_DELAY = 1.5  # Seconds from detection to servo actuation
+SORT_DELAY = 2.0  # Seconds from detection to servo actuation
 SERVO_CHUTE_CLEAR_TIME = 1  # Seconds for servo settle and chute clear
-POST_SORT_ADVANCE = 1  # Seconds to run conveyor post-sort to position next copra
+POST_SORT_ADVANCE = 0  # No advance needed since motor runs continuously
 DROP_DELAY = 1  # Seconds from servo actuation to bin drop (for stats)
 AS_BULB_DELAY = 0.5  # Seconds for AS7263 bulb on/off simulation
 DETECTION_COOLDOWN = 1  # Seconds before allowing new detection
@@ -63,7 +67,7 @@ DETECTION_COOLDOWN = 1  # Seconds before allowing new detection
 class ACSSGui:
     def __init__(self, root):
         self.root = root
-        root.title("Automated Copra Segregation System")
+        root.title("Automated Copra Segregation System (Simplified)")
         # Set full screen for 1024x600
         self.root.attributes('-fullscreen', True)
 
@@ -100,7 +104,7 @@ class ACSSGui:
         self.frame_lock = threading.Lock()
         self.latest_frame = None
         self.serial_reader_thread_obj = None
-        self.sort_queue = deque()  # Queue: {'detection_time', 'sort_char', 'category', 'moisture'}
+        self.latest_detection = None  # Single detection instead of queue
         self.as_request_cooldown = 0
         self.detection_cooldown = 0  # For 1s detection cooldown
         self.serial_error_logged = False  # Prevent serial error spam
@@ -109,8 +113,8 @@ class ACSSGui:
         self.as7263_data = None
         self.as7263_timestamp = 0
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
-        self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
+        self.class_to_sort = {0: 'L', 1: 'R', 2: 'C'}  # Overcooked (L), Raw (R), Standard (C)
+        self.category_map = {0: 'Overcooked', 1: 'Raw', 2: 'Standard'}  # Align with model
         self.stats = {
             'Raw': 0,
             'Standard': 0,
@@ -119,7 +123,6 @@ class ACSSGui:
             'start_time': None,
             'end_time': None
         }
-        self.conveyor_paused = False  # New flag for conveyor pause state
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -390,6 +393,11 @@ class ACSSGui:
                         vals = line[3:].split(",")
                         self.as7263_data = vals
                         self.as7263_timestamp = time.time()
+                        # Log moisture for the latest detection
+                        if self.latest_detection:
+                            category = self.latest_detection.get('category', 'Overcooked')
+                            moisture = self.latest_detection.get('moisture', 4.0)
+                            self._log_message(f"Moisture for {category}: {moisture}%")
                     elif line == "ACK":
                         pass
                 except Exception as e:
@@ -419,7 +427,7 @@ class ACSSGui:
             self.send_cmd("MOTOR,ON")
             self.stats['start_time'] = time.time()
             self.stats['end_time'] = None
-            self.sort_queue.clear()
+            self.latest_detection = None
             self.serial_error_logged = False
             self.frame_drop_logged = False
             self.as_request_cooldown = time.time()
@@ -442,7 +450,7 @@ class ACSSGui:
                 return
             self.send_cmd("MOTOR,OFF")
             self.stats['end_time'] = time.time()
-            self.sort_queue.clear()
+            self.latest_detection = None
             self.serial_error_logged = False
             self.frame_drop_logged = False
             self.as_request_cooldown = time.time()
@@ -455,26 +463,14 @@ class ACSSGui:
             print(f"Stop process error: {e}")
 
     def sort_processor_loop(self):
-        """Process sort queue with FIFO, stopping exactly at SORT_DELAY, servo rotation, and advance."""
+        """Process latest detection with 2s delay, motor runs continuously."""
         while self.running:
             try:
-                if self.sort_queue and time.time() >= self.sort_queue[0]['detection_time'] + SORT_DELAY:
-                    item = self.sort_queue.popleft()
-                    self.conveyor_paused = True  # Set pause flag
-                    self.send_cmd("MOTOR,OFF")
+                if self.latest_detection and time.time() >= self.latest_detection['detection_time'] + SORT_DELAY:
+                    item = self.latest_detection
+                    self.latest_detection = None  # Clear detection
                     self.send_sort(item['sort_char'])
                     time.sleep(SERVO_CHUTE_CLEAR_TIME)
-                    self.send_cmd("MOTOR,ON")
-                    time.sleep(POST_SORT_ADVANCE)
-                    # Wait for next copra's SORT_DELAY if queued
-                    if self.sort_queue:
-                        next_item_time = self.sort_queue[0]['detection_time'] + SORT_DELAY
-                        current_time = time.time()
-                        if current_time < next_item_time:
-                            remaining_delay = next_item_time - current_time
-                            self.send_cmd("MOTOR,OFF")
-                            time.sleep(remaining_delay)
-                    self.conveyor_paused = False  # Reset pause flag
                     threading.Timer(DROP_DELAY, lambda: self._update_stats_after_drop(item['category'], item['moisture'])).start()
                 time.sleep(0.01)
             except Exception as e:
@@ -484,7 +480,7 @@ class ACSSGui:
     def _update_stats_after_drop(self, category, moisture):
         try:
             self.stats[category] += 1
-            self.stats['total'] += 1
+            self.stats['total'] = self.stats['Raw'] + self.stats['Standard'] + self.stats['Overcooked']
             self.moisture_sums[category] += moisture
             self.root.after(0, self.update_stats)
         except Exception as e:
@@ -547,10 +543,7 @@ class ACSSGui:
             print(f"Camera stop error: {e}")
 
     def camera_loop(self):
-        frame_counter = 0
-        fps_time = time.time()
         last_frame_time = time.time()
-        last_fps_log = time.time()
         display_skip = 0
         while self.camera_running:
             try:
@@ -568,15 +561,12 @@ class ACSSGui:
 
                 results = None
                 if self.yolo and current_time > self.detection_cooldown:
-                    yolo_start = time.time()
                     results = self.yolo.predict(
                         source=frame,
                         conf=0.3,
                         max_det=3,
                         verbose=False
                     )
-                    yolo_time = time.time() - yolo_start
-                    # Suppress YOLO time log entirely
 
                 has_detection = results and results[0].boxes and len(results[0].boxes) > 0
 
@@ -587,7 +577,7 @@ class ACSSGui:
 
                 # Process sorting
                 as7263_valid = self.as7263_data is not None and (current_time - self.as7263_timestamp) < 0.5
-                if self.process_running and has_detection and current_time > self.detection_cooldown and as7263_valid and not self.conveyor_paused:  # Skip queuing if paused
+                if self.process_running and has_detection and current_time > self.detection_cooldown and as7263_valid:
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                     conf_tensor = results[0].boxes.conf.cpu().numpy()
@@ -598,13 +588,15 @@ class ACSSGui:
                         conf = conf_tensor[i]
                         if conf > 0.3 and y_center < FALLBACK_ZONE_Y:
                             # Adjusted moisture ranges
-                            if cls == 0:  # Raw
-                                moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
-                            elif cls == 1:  # Standard
+                            if cls == 0:  # Overcooked
+                                moisture = 4.0 + (conf - 0.3) * (6.0 - 4.0) / 0.7
+                            elif cls == 1:  # Raw
+                                moisture = 7.1 + (conf - 0.3) * (14.0 - 7.1) / 0.7
+                            elif cls == 2:  # Standard
                                 moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
-                            else:  # Overcooked or unknown
-                                cls = 2
-                                moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
+                            else:  # Fallback
+                                cls = 0  # Treat unknown as Overcooked
+                                moisture = 4.0
                             moisture = round(moisture, 1)
                             candidates.append((cls, conf, y_center, moisture))
 
@@ -612,15 +604,15 @@ class ACSSGui:
                         candidates.sort(key=lambda x: x[2])  # Lowest y first
                         leading = candidates[0]
                         cls, conf, y_center, moisture = leading
-                        sort_char = self.class_to_sort.get(cls, 'R')
+                        sort_char = self.class_to_sort.get(cls, 'L')  # Fallback to Overcooked (L)
                         category = self.category_map.get(cls, 'Overcooked')
-                        self.sort_queue.append({
+                        self.latest_detection = {
                             'detection_time': current_time,
                             'sort_char': sort_char,
                             'category': category,
                             'moisture': moisture
-                        })
-                        self._log_message(f"Queued {category} for sorting (conf {conf:.2f}, moisture {moisture}%)")
+                        }
+                        self._log_message(f"Detected {category} for sorting (conf {conf:.2f})")
                         self.detection_cooldown = current_time + DETECTION_COOLDOWN
 
                 # Update display every other frame
@@ -629,14 +621,6 @@ class ACSSGui:
                     display_frame = results[0].plot() if results and results[0].boxes else frame
                     display_frame = cv2.resize(display_frame, CAM_PREVIEW_SIZE)
                     self.update_canvas_with_frame(display_frame)
-
-                frame_counter += 1
-                if frame_counter >= 50 and current_time - last_fps_log > 5.0:
-                    fps = frame_counter / (current_time - fps_time)
-                    self._log_message(f"FPS: {fps:.1f}")
-                    print(f"FPS: {fps:.1f}")
-                    fps_time = time.time()
-                    frame_counter = 0
 
                 time.sleep(0.01)
             except Exception as e:

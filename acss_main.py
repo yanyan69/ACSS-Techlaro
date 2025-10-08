@@ -435,35 +435,43 @@ class ACSSGui:
         frame_counter = 0
         fps_time = time.time()
         last_frame_time = time.time()
+        last_fps_log = time.time()
+        last_drop_log = time.time()
+        display_skip = 0  # Skip every other frame for display
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-                # Check for frame drops
+                # Check for significant frame drops
                 current_time = time.time()
-                if current_time - last_frame_time > 0.1:  # >100ms gap
+                if current_time - last_frame_time > 0.2 and current_time - last_drop_log > 5.0:  # >200ms, log every 5s
                     self._log_message(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
+                    last_drop_log = current_time
                 last_frame_time = current_time
 
                 results = None
                 if self.yolo:
+                    yolo_start = time.time()
                     if self.process_running:
                         results = self.yolo.track(
                             source=frame,
                             persist=True,
                             tracker=TRACKER_PATH,
-                            conf=0.25,
-                            max_det=5,
+                            conf=0.3,  # Increased to reduce low-conf detections
+                            max_det=3,  # Reduced for faster processing
                             verbose=False
                         )
                     else:
                         results = self.yolo.predict(
                             source=frame,
-                            conf=0.25,
-                            max_det=5,
+                            conf=0.3,
+                            max_det=3,
                             verbose=False
                         )
+                    yolo_time = time.time() - yolo_start
+                    if yolo_time > 0.1:  # Log if YOLO takes >100ms
+                        self._log_message(f"YOLO processing time: {yolo_time:.3f}s")
 
                 # Process sorting if results exist
                 if self.process_running and results and results[0].boxes and len(results[0].boxes) > 0 and time.time() > self.sort_cooldown:
@@ -483,7 +491,7 @@ class ACSSGui:
                         y_center = (boxes[i, 1] + boxes[i, 3]) / 2
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
-                        if conf > 0.25:
+                        if conf > 0.3:
                             if track_id != -1 and track_id not in self.sorted_tracks and y_center < SORT_ZONE_Y:
                                 if track_id not in self.track_start_times:
                                     self.track_start_times[track_id] = current_time
@@ -520,23 +528,21 @@ class ACSSGui:
                             self.track_start_times.clear()
                         self.last_cleanup = current_time
 
-                # Plot boxes only for display
-                display_frame = results[0].plot() if results and results[0].boxes else frame
-                display_frame = cv2.resize(display_frame, CAM_PREVIEW_SIZE)
+                # Update display every other frame to reduce lag
+                display_skip = (display_skip + 1) % 2
+                if display_skip == 0:
+                    display_frame = results[0].plot() if results and results[0].boxes else frame
+                    display_frame = cv2.resize(display_frame, CAM_PREVIEW_SIZE)
+                    self.update_canvas_with_frame(display_frame)
 
                 frame_counter += 1
-                if frame_counter >= 10:
-                    fps = 10 / (time.time() - fps_time)
-                    if fps < 10:
-                        self._log_message(f"Low FPS: {fps:.1f}")
-                    fps_time = time.time()
+                if frame_counter >= 50 and current_time - last_fps_log > 5.0:  # Log FPS every 5s
+                    fps = frame_counter / (current_time - fps_time)
+                    self._log_message(f"FPS: {fps:.1f}")
+                    fps_time = current_time
                     frame_counter = 0
-                    cv2.putText(display_frame, f"FPS: {fps:.1f}", (10, 25),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-                self.update_canvas_with_frame(display_frame)
-
-                time.sleep(0.01)  # Reduced to aim for higher FPS
+                time.sleep(0.01)
             except Exception as e:
                 self._log_message(f"Camera loop error: {e}")
                 time.sleep(0.2)

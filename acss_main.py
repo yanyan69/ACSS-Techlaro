@@ -52,10 +52,10 @@ USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
-SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
-FALLBACK_ZONE_Y = 450  # Secondary zone for detections
+SORT_ZONE_Y = 240  # Top ~73% of 480px frame for primary sorting
+FALLBACK_ZONE_Y = 100  # Secondary zone for detections
 
-SORT_DELAY = 1.4  # Seconds from detection to servo actuation
+SORT_DELAY = 1.3  # Seconds from detection to servo actuation
 SERVO_CHUTE_CLEAR_TIME = 1  # Seconds for servo settle and chute clear
 POST_SORT_ADVANCE = 0  # No advance needed since motor runs continuously
 DROP_DELAY = 1  # Seconds from servo actuation to bin drop (for stats)

@@ -2,9 +2,9 @@
 """
 ACSS GUI with Tabs, Process Control, and Servo Fixes.
 - Optimized for 95 RPM conveyor at 80% speed.
-- Uses old code's motor/servo control for debugging-friendliness.
-- AS7263 LED lights for 1s per YOLO detection, no AS7263 logs.
-- Removed TX logs, moved YOLO processing time to console.
+- Uses motor/servo control with FIFO queue for multiple copra.
+- AS7263 bulb simulation with delays, no real data used.
+- Suppressed spammy logs, full screen, reset stats, unknown to Overcooked.
 """
 
 import tkinter as tk
@@ -46,16 +46,23 @@ CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution as requested
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
-YOLO_MODEL_PATH = "my_model/my_model.pt"  # Use "yolov11n.pt" for lightweight testing
+YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
 SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
 FALLBACK_ZONE_Y = 400  # Secondary zone for detections
+SORT_DELAY = 4.0  # Seconds from detection to servo actuation
+DROP_DELAY = 2.0  # Seconds from servo actuation to bin drop (for stats)
+SERVO_CHUTE_CLEAR_TIME = 1.5  # Seconds for servo settle and chute clear
+AS_BULB_DELAY = 0.5  # Seconds for AS7263 bulb on/off simulation
+DETECTION_COOLDOWN = 1.0  # Seconds before allowing new detection
+POST_SORT_ADVANCE = 1.0  # Seconds to run conveyor post-sort to position next copra
 # ---------------------------------------------------
 
 class ACSSGui:
     def __init__(self, root):
         self.root = root
         root.title("Automated Copra Segregation System")
-        root.geometry("1024x600")
+        # Set full screen for 1024x600
+        self.root.attributes('-fullscreen', True)
 
         # Notebook (Tabs)
         notebook = ttk.Notebook(root)
@@ -90,8 +97,15 @@ class ACSSGui:
         self.frame_lock = threading.Lock()
         self.latest_frame = None
         self.serial_reader_thread_obj = None
-        self.sort_cooldown = 0
-        self.as_led_cooldown = 0  # Cooldown for AS7263 LED
+        self.sort_queue = deque()  # Queue: {'detection_time', 'sort_char', 'category', 'moisture'}
+        self.as_request_cooldown = 0
+        self.detection_cooldown = 0  # For 1s detection cooldown
+        self.serial_error_logged = False  # Prevent serial error spam
+        self.frame_drop_logged = False  # Prevent frame drop spam
+        self.yolo_log_suppressed = True  # Suppress YOLO time logs
+        self.as7263_data = None
+        self.as7263_timestamp = 0
+        self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
         self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
         self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
         self.stats = {
@@ -102,13 +116,8 @@ class ACSSGui:
             'start_time': None,
             'end_time': None
         }
-        self.sort_queue = deque()  # Queue for pending sorts
-        self.serial_error_logged = False  # Prevent serial error spam
-        self.as7263_data = None  # Latest AS7263 reading
-        self.as7263_timestamp = 0  # Timestamp of last reading
-        self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}  # For avg moisture
 
-        # Load YOLO if available
+        # Load YOLO
         if ULTRALYTICS_AVAILABLE:
             try:
                 print("Loading YOLO model...")
@@ -125,13 +134,11 @@ class ACSSGui:
         else:
             self.process_btn.config(state='disabled')
 
-        # Disable process button if no serial
         if not SERIAL_AVAILABLE:
             self.process_btn.config(state='disabled')
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    # -------------------- HOME --------------------
     def _build_home_tab(self):
         frm = tk.Frame(self.home_tab)
         frm.pack(fill="both", expand=True, padx=8, pady=8)
@@ -186,14 +193,22 @@ class ACSSGui:
             self.process_running = False
 
     def _log_message(self, msg):
+        # Suppress spammy logs
+        if ("Frame drop" in msg and self.frame_drop_logged) or \
+           ("Serial reader exception" in msg and self.serial_error_logged):
+            return
         ts = time.strftime("%H:%M:%S")
         full_msg = f"[{ts}] {msg}"
         self.log.config(state='normal')
         self.log.insert("end", full_msg + "\n")
         self.log.see("end")
         self.log.config(state='disabled')
+        # Set flags for suppressed logs
+        if "Frame drop" in msg:
+            self.frame_drop_logged = True
+        if "Serial reader exception" in msg:
+            self.serial_error_logged = True
 
-    # ----------------- STATISTICS -----------------
     def _build_statistics_tab(self):
         frm = tk.Frame(self.statistics_tab)
         frm.pack(fill="both", expand=True, padx=8, pady=8)
@@ -238,27 +253,18 @@ class ACSSGui:
         self.end_time_label = tk.Label(stats_frame, text="N/A")
         self.end_time_label.grid(row=row_offset+3, column=1, padx=8, pady=4)
 
-    def update_stats(self):
-        try:
-            for cat in ["Standard", "Raw", "Overcooked"]:
-                pieces = self.stats[cat]
-                self.stat_pieces[cat].config(text=str(pieces))
-                moisture_avg = (self.moisture_sums[cat] / pieces) if pieces > 0 else 0.0
-                self.stat_moisture[cat].config(text=f"{moisture_avg:.1f}%")
-            self.total_pieces_label.config(text=str(self.stats['total']))
-            total_pieces = self.stats['total']
-            total_moisture = sum(self.moisture_sums.values())
-            total_avg = (total_moisture / total_pieces) if total_pieces > 0 else 0.0
-            self.total_moisture_label.config(text=f"{total_avg:.1f}%")
-            start_str = time.strftime("%H:%M:%S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
-            end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
-            self.start_time_label.config(text=start_str)
-            self.end_time_label.config(text=end_str)
-            self.root.update()  # Force GUI refresh
-        except Exception as e:
-            self._log_message(f"Stats update error: {type(e).__name__}: {str(e)}")
+        # Reset button
+        tk.Button(stats_frame, text="Reset Statistics", font=("Arial", 10), command=self._reset_stats).grid(row=row_offset+4, column=0, columnspan=3, pady=10)
 
-    # ------------------- ABOUT --------------------
+    def _reset_stats(self):
+        for cat in ["Raw", "Standard", "Overcooked"]:
+            self.stats[cat] = 0
+            self.moisture_sums[cat] = 0.0
+        self.stats['total'] = 0
+        self.stats['start_time'] = None
+        self.stats['end_time'] = None
+        self.update_stats()
+
     def _build_about_tab(self):
         frm = tk.Frame(self.about_tab)
         frm.pack(fill="both", expand=True, padx=8, pady=8)
@@ -273,7 +279,6 @@ class ACSSGui:
                       "Marinduque State University, 2025",
                  font=("Arial", 12), justify="center").pack(pady=40)
 
-    # ------------------- EXIT ---------------------
     def _build_exit_tab(self):
         frm = tk.Frame(self.exit_tab)
         frm.pack(fill="both", expand=True, padx=8, pady=8)
@@ -290,9 +295,11 @@ class ACSSGui:
 
     def _exit_program(self):
         if messagebox.askokcancel("Exit", "Are you sure you want to exit?"):
+            self.stop_process()
+            self.stop_camera()
+            self.close_serial()
             self.on_close()
 
-    # ---------- Serial Methods ----------
     def open_serial(self):
         try:
             if not SERIAL_AVAILABLE:
@@ -315,6 +322,8 @@ class ACSSGui:
     def close_serial(self):
         try:
             if self.serial and self.serial.is_open:
+                # Send RESET to clean up Arduino state
+                self.send_cmd("RESET")
                 self.serial.close()
                 self._log_message("Serial closed.")
                 print("Serial closed.")
@@ -346,18 +355,6 @@ class ACSSGui:
                 print(f"Invalid servo command: {char}")
                 return
             cmd = f"SORT,{char}"
-            self.sort_queue.append(char)
-            self._process_sort_queue()
-        except Exception as e:
-            self._log_message(f"Servo send_sort failed: {e}")
-            print(f"Servo send_sort failed: {e}")
-
-    def _process_sort_queue(self):
-        if not self.sort_queue or time.time() < self.sort_cooldown:
-            return
-        char = self.sort_queue.popleft()
-        try:
-            cmd = f"SORT,{char}"
             with self.serial_lock:
                 self.serial.write((cmd + "\n").encode())
                 self.serial.flush()
@@ -371,11 +368,10 @@ class ACSSGui:
                 if not got_ack:
                     self._log_message(f"No ACK for SORT,{char}")
                     print(f"No ACK for SORT,{char}")
-                    self.sort_queue.append(char)
+                    # Don't requeue to avoid infinite loop; log and proceed
         except Exception as e:
             self._log_message(f"Sort failed: {e}")
             print(f"Sort failed: {e}")
-            self.sort_queue.append(char)
 
     def serial_reader_thread(self):
         self._log_message("Serial reader started.")
@@ -388,11 +384,10 @@ class ACSSGui:
                         continue
                     if line.startswith("AS:"):
                         vals = line[3:].split(",")
-                        self.as7263_data = vals  # Store latest AS7263 reading
+                        self.as7263_data = vals
                         self.as7263_timestamp = time.time()
                     elif line == "ACK":
-                        pass  # Silently handle ACK
-                    # Silently ignore other messages
+                        pass
                 except Exception as e:
                     if not self.serial_error_logged:
                         self._log_message(f"Serial reader exception: {e}")
@@ -403,7 +398,6 @@ class ACSSGui:
             self._log_message(f"Serial reader crashed: {outer}")
             print(f"Serial reader crashed: {outer}")
 
-    # ---------- Process Control ----------
     def start_process(self):
         try:
             if not (self.serial and self.serial.is_open):
@@ -421,10 +415,14 @@ class ACSSGui:
             self.send_cmd("MOTOR,ON")
             self.stats['start_time'] = time.time()
             self.stats['end_time'] = None
-            self.sort_cooldown = time.time()
-            self.as_led_cooldown = time.time()
             self.sort_queue.clear()
             self.serial_error_logged = False
+            self.frame_drop_logged = False
+            self.as_request_cooldown = time.time()
+            self.detection_cooldown = time.time()
+            # Start sort processor thread
+            self.sort_processor_thread = threading.Thread(target=self.sort_processor_loop, daemon=True)
+            self.sort_processor_thread.start()
             self._log_message("Process started: Motor ON, detection active.")
             print("Process started: Motor ON, detection active.")
             self.root.after(0, self.update_stats)
@@ -442,7 +440,9 @@ class ACSSGui:
             self.stats['end_time'] = time.time()
             self.sort_queue.clear()
             self.serial_error_logged = False
-            self.as_led_cooldown = time.time()
+            self.frame_drop_logged = False
+            self.as_request_cooldown = time.time()
+            self.detection_cooldown = time.time()
             self._log_message("Process stopped: Motor OFF, detection inactive.")
             print("Process stopped: Motor OFF, detection inactive.")
             self.root.after(0, self.update_stats)
@@ -450,7 +450,48 @@ class ACSSGui:
             self._log_message(f"Stop process error: {e}")
             print(f"Stop process error: {e}")
 
-    # ---------- Camera Methods ----------
+    def sort_processor_loop(self):
+        """Process sort queue with FIFO, motor pauses, and partial advance."""
+        while self.running:
+            try:
+                if self.sort_queue and time.time() >= self.sort_queue[0]['detection_time'] + SORT_DELAY:
+                    item = self.sort_queue.popleft()
+                    self.send_cmd("MOTOR,OFF")
+                    self.send_sort(item['sort_char'])
+                    time.sleep(SERVO_CHUTE_CLEAR_TIME)  # Wait for servo and chute clear
+                    self.send_cmd("MOTOR,ON")
+                    time.sleep(POST_SORT_ADVANCE)  # Advance conveyor for next copra
+                    if self.sort_queue:  # Stop if more items to prevent overlap
+                        self.send_cmd("MOTOR,OFF")
+                    # Schedule stats update after drop
+                    threading.Timer(DROP_DELAY, lambda: self._update_stats_after_drop(item['category'], item['moisture'])).start()
+                time.sleep(0.1)
+            except Exception as e:
+                self._log_message(f"Sort processor error: {e}")
+                print(f"Sort processor error: {e}")
+
+    def _update_stats_after_drop(self, category, moisture):
+        try:
+            self.stats[category] += 1
+            self.stats['total'] += 1
+            self.moisture_sums[category] += moisture
+            self.root.after(0, self.update_stats)
+        except Exception as e:
+            self._log_message(f"Stats update after drop error: {e}")
+            print(f"Stats update after drop error: {e}")
+
+    def _simulate_as7263_measurement(self):
+        """Simulate AS7263 measurement with bulb toggles."""
+        try:
+            self.send_cmd("AS_BULB_ON")
+            time.sleep(AS_BULB_DELAY)
+            self.send_cmd("REQ_AS")
+            time.sleep(AS_BULB_DELAY)
+            self.send_cmd("AS_BULB_OFF")
+        except Exception as e:
+            self._log_message(f"AS7263 simulation error: {e}")
+            print(f"AS7263 simulation error: {e}")
+
     def start_camera(self):
         if self.camera_running:
             self._log_message("Camera already running.")
@@ -499,78 +540,77 @@ class ACSSGui:
         fps_time = time.time()
         last_frame_time = time.time()
         last_fps_log = time.time()
-        last_drop_log = time.time()
         display_skip = 0
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
-                # Check for significant frame drops
                 current_time = time.time()
-                if current_time - last_frame_time > 0.2 and current_time - last_drop_log > 5.0:
-                    self._log_message(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
-                    print(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
-                    last_drop_log = current_time
+                # Suppress frame drop logs
+                if current_time - last_frame_time > 0.2:
+                    if not self.frame_drop_logged:
+                        self._log_message(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
+                        print(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
+                        self.frame_drop_logged = True
                 last_frame_time = current_time
 
                 results = None
-                if self.yolo:
+                if self.yolo and current_time > self.detection_cooldown:
                     yolo_start = time.time()
-                    self.send_cmd("REQ_AS")  # Request AS7263 reading
-                    results = self.yolo.predict(  # Reverted to predict
+                    results = self.yolo.predict(
                         source=frame,
                         conf=0.3,
                         max_det=3,
                         verbose=False
                     )
                     yolo_time = time.time() - yolo_start
-                    if yolo_time > 0.1:
-                        print(f"YOLO processing time: {yolo_time:.3f}s")  # Log to console
+                    # Suppress YOLO time log entirely
 
-                # Trigger AS7263 LED on detection
-                if results and results[0].boxes and len(results[0].boxes) > 0 and time.time() > self.as_led_cooldown:
-                    self.send_cmd("AS_IND_ON")  # Turn on AS7263 LED for 1s
-                    self.as_led_cooldown = time.time() + 1.2
+                has_detection = results and results[0].boxes and len(results[0].boxes) > 0
 
-                # Process sorting if results exist and AS7263 validates
+                # AS7263 simulation only on detection
+                if has_detection and current_time > self.as_request_cooldown:
+                    threading.Thread(target=self._simulate_as7263_measurement, daemon=True).start()
+                    self.as_request_cooldown = current_time + 1
+
+                # Process sorting
                 as7263_valid = self.as7263_data is not None and (current_time - self.as7263_timestamp) < 0.5
-                if self.process_running and results and results[0].boxes and len(results[0].boxes) > 0 and time.time() > self.sort_cooldown and as7263_valid:
+                if self.process_running and has_detection and current_time > self.detection_cooldown and as7263_valid:
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                     conf_tensor = results[0].boxes.conf.cpu().numpy()
-
                     candidates = []
                     for i in range(len(cls_tensor)):
                         y_center = (boxes[i, 1] + boxes[i, 3]) / 2
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
                         if conf > 0.3 and y_center < FALLBACK_ZONE_Y:
-                            # Estimate moisture
+                            # Adjusted moisture ranges
                             if cls == 0:  # Raw
-                                moisture = 7.1 + (conf - 0.3) * (8.0 - 7.1) / 0.7
+                                moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
                             elif cls == 1:  # Standard
                                 moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
-                            else:  # Overcooked
-                                moisture = 5.0 + (conf - 0.3) * (5.9 - 5.0) / 0.7
+                            else:  # Overcooked or unknown
+                                cls = 2
+                                moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
                             moisture = round(moisture, 1)
                             candidates.append((cls, conf, y_center, moisture))
 
                     if candidates:
-                        # Sort candidates by y-center (ascending: lowest y first = leading/highest on screen)
-                        candidates.sort(key=lambda x: x[2])  # Sort by y_center
-                        leading = candidates[0]  # First = leading
+                        candidates.sort(key=lambda x: x[2])  # Lowest y first
+                        leading = candidates[0]
                         cls, conf, y_center, moisture = leading
-                        
-                        sort_char = self.class_to_sort.get(cls, 'C')
-                        self.send_sort(sort_char)
-                        category = self.category_map.get(cls, 'Standard')
-                        self.stats[category] += 1
-                        self.stats['total'] += 1
-                        self.moisture_sums[category] += moisture
-                        self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, y={y_center:.1f}, moisture {moisture}%) to {sort_char}")
-                        self.sort_cooldown = current_time + 0.3
-                        self.root.after(0, self.update_stats)
+                        sort_char = self.class_to_sort.get(cls, 'R')
+                        category = self.category_map.get(cls, 'Overcooked')
+                        self.sort_queue.append({
+                            'detection_time': current_time,
+                            'sort_char': sort_char,
+                            'category': category,
+                            'moisture': moisture
+                        })
+                        self._log_message(f"Queued {category} for sorting (conf {conf:.2f}, moisture {moisture}%)")
+                        self.detection_cooldown = current_time + DETECTION_COOLDOWN
 
                 # Update display every other frame
                 display_skip = (display_skip + 1) % 2
@@ -608,25 +648,36 @@ class ACSSGui:
             self._log_message(f"Display frame error: {e}")
             print(f"Display frame error: {e}")
 
-    # ---------- Shutdown ----------
+    def update_stats(self):
+        try:
+            for cat in ["Standard", "Raw", "Overcooked"]:
+                pieces = self.stats[cat]
+                self.stat_pieces[cat].config(text=str(pieces))
+                moisture_avg = (self.moisture_sums[cat] / pieces) if pieces > 0 else 0.0
+                self.stat_moisture[cat].config(text=f"{moisture_avg:.1f}%")
+            self.total_pieces_label.config(text=str(self.stats['total']))
+            total_pieces = self.stats['total']
+            total_moisture = sum(self.moisture_sums.values())
+            total_avg = (total_moisture / total_pieces) if total_pieces > 0 else 0.0
+            self.total_moisture_label.config(text=f"{total_avg:.1f}%")
+            start_str = time.strftime("%H:%M:%S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
+            end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
+            self.start_time_label.config(text=start_str)
+            self.end_time_label.config(text=end_str)
+            self.root.update()
+        except Exception as e:
+            self._log_message(f"Stats update error: {type(e).__name__}: {str(e)}")
+
     def on_close(self):
         self.running = False
         self.process_running = False
         self.camera_running = False
-        try:
-            if self.picam2:
-                self.picam2.stop()
-        except:
-            pass
-        try:
-            if self.serial and self.serial.is_open:
-                self.serial.close()
-        except:
-            pass
+        self.stop_process()
+        self.stop_camera()
+        self.close_serial()
         self._log_message("Application closed.")
         print("Application closed.")
         self.root.destroy()
-
 
 if __name__ == "__main__":
     root = tk.Tk()

@@ -55,7 +55,7 @@ SERVO_CHUTE_CLEAR_TIME = 1.5  # Seconds for servo settle and chute clear
 POST_SORT_ADVANCE = 1  # Seconds to run conveyor post-sort to position next copra
 DROP_DELAY = 1  # Seconds from servo actuation to bin drop (for stats)
 AS_BULB_DELAY = 0.5  # Seconds for AS7263 bulb on/off simulation
-DETECTION_COOLDOWN = 0.5  # Seconds before allowing new detection
+DETECTION_COOLDOWN = 1  # Seconds before allowing new detection
 
 # ---------------------------------------------------
 

@@ -195,7 +195,7 @@ class ACSSGui:
     def _log_message(self, msg):
         # Suppress spammy logs
         if ("Frame drop" in msg and self.frame_drop_logged) or \
-           ("Serial reader exception" in msg and self.serial_error_logged):
+            ("Serial reader exception" in msg and self.serial_error_logged):
             return
         ts = time.strftime("%H:%M:%S")
         full_msg = f"[{ts}] {msg}"
@@ -451,7 +451,7 @@ class ACSSGui:
             print(f"Stop process error: {e}")
 
     def sort_processor_loop(self):
-        """Process sort queue with FIFO, motor pauses, and partial advance."""
+        """Process sort queue with FIFO, motor pauses, and partial advance, waiting for next copra's SORT_DELAY."""
         while self.running:
             try:
                 if self.sort_queue and time.time() >= self.sort_queue[0]['detection_time'] + SORT_DELAY:
@@ -461,8 +461,14 @@ class ACSSGui:
                     time.sleep(SERVO_CHUTE_CLEAR_TIME)  # Wait for servo and chute clear
                     self.send_cmd("MOTOR,ON")
                     time.sleep(POST_SORT_ADVANCE)  # Advance conveyor for next copra
-                    if self.sort_queue:  # Stop if more items to prevent overlap
-                        self.send_cmd("MOTOR,OFF")
+                    # Check if another item is queued and has remaining SORT_DELAY
+                    if self.sort_queue:
+                        next_item_time = self.sort_queue[0]['detection_time'] + SORT_DELAY
+                        current_time = time.time()
+                        if current_time < next_item_time:
+                            remaining_delay = next_item_time - current_time
+                            self.send_cmd("MOTOR,OFF")
+                            time.sleep(remaining_delay)  # Wait for next copra's SORT_DELAY
                     # Schedule stats update after drop
                     threading.Timer(DROP_DELAY, lambda: self._update_stats_after_drop(item['category'], item['moisture'])).start()
                 time.sleep(0.1)

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 ACSS GUI with Tabs, Process Control, YOLO Tracking, FIFO Sorting, and Servo Fixes.
-AS7263 light disabled, IR logging removed, fixed track mismatches and ignored copra.
+AS7263 light disabled, IR logging removed, fixed track mismatches, ignored copra,
+Tkinter config error, and mitigated PDAF errors.
 Optimized for 95 RPM conveyor at 80% speed.
 """
 
@@ -40,7 +41,7 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (640, 480)
+CAM_PREVIEW_SIZE = (640, 480)  # Try (320, 240) if PDAF errors persist
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
@@ -236,13 +237,16 @@ class ACSSGui:
         self.end_time_label.grid(row=row_offset+3, column=1, padx=8, pady=4)
 
     def update_stats(self):
-        for cat in ["Standard", "Raw", "Overcooked"]:
-            self.stat_pieces[cat].config(text=str(self.stats[cat]))
-        self.total_pieces_label.config(text=str(self.stats['total']))
-        start_str = time.strftime("%H:%M:%S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
-        end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
-        self.start_time_label.config(text=start_str)
-        self.end_time_label.config(end_str)
+        try:
+            for cat in ["Standard", "Raw", "Overcooked"]:
+                self.stat_pieces[cat].config(text=str(self.stats[cat]))
+            self.total_pieces_label.config(text=str(self.stats['total']))
+            start_str = time.strftime("%H:%M:%S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
+            end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
+            self.start_time_label.config(text=start_str)
+            self.end_time_label.config(text=end_str)
+        except Exception as e:
+            self._log_message(f"Stats update error: {e}")
 
     # ------------------- ABOUT --------------------
     def _build_about_tab(self):
@@ -342,7 +346,7 @@ class ACSSGui:
                 self.serial.flush()
                 t0 = time.time()
                 got_ack = False
-                while time.time() - t0 < 1.5:  # Increased timeout
+                while time.time() - t0 < 1.5:
                     line = self.serial.readline().decode(errors='ignore').strip()
                     if line == "ACK":
                         self._log_message("RX <- ACK for SORT")
@@ -350,12 +354,12 @@ class ACSSGui:
                         break
                 if not got_ack:
                     self._log_message(f"No ACK for SORT,{char}")
-                    self.sort_queue.append(char)  # Re-queue
+                    self.sort_queue.append(char)
         except Exception as e:
             if not self.serial_error_logged:
                 self._log_message(f"Sort failed: {e}")
                 self.serial_error_logged = True
-            self.sort_queue.append(char)  # Re-queue
+            self.sort_queue.append(char)
 
     def serial_reader_thread(self):
         self._log_message("Serial reader started.")
@@ -380,7 +384,7 @@ class ACSSGui:
     def start_process(self):
         self.stats['start_time'] = time.time()
         self.stats['end_time'] = None
-        self.send_cmd("MOTOR_SPEED,80")  # Set 80% speed (adjust if not supported)
+        self.send_cmd("MOTOR_SPEED,80")  # Adjust if Arduino doesn't support
         self.send_cmd("MOTOR,ON")
         self.sort_cooldown = time.time()
         self.sorted_tracks.clear()
@@ -405,7 +409,7 @@ class ACSSGui:
         try:
             self.picam2 = Picamera2()
             config = self.picam2.create_preview_configuration(
-                main={"format": 'XRGB8888', "size": (640, 480)}
+                main={"format": 'XRGB8888', "size": CAM_PREVIEW_SIZE}
             )
             self.picam2.configure(config)
             self.picam2.start()
@@ -430,10 +434,17 @@ class ACSSGui:
     def camera_loop(self):
         frame_counter = 0
         fps_time = time.time()
+        last_frame_time = time.time()
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+                # Check for frame drops
+                current_time = time.time()
+                if current_time - last_frame_time > 0.1:  # >100ms gap
+                    self._log_message(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
+                last_frame_time = current_time
 
                 results = None
                 if self.yolo:
@@ -453,9 +464,8 @@ class ACSSGui:
                             max_det=5,
                             verbose=False
                         )
-                    if results and results[0].boxes is not None:
-                        frame = results[0].plot()
 
+                # Process sorting if results exist
                 if self.process_running and results and results[0].boxes and len(results[0].boxes) > 0 and time.time() > self.sort_cooldown:
                     track_ids = results[0].boxes.id.cpu().numpy().astype(int) if results[0].boxes.id is not None else []
                     boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -482,7 +492,6 @@ class ACSSGui:
                                 self._log_message(f"Untracked detection (class {cls}, conf {conf:.2f}, y={y_center:.1f})")
                                 untracked_candidates.append((cls, conf, y_center))
 
-                    # Sort all candidates in one cycle
                     for candidate in sorted(candidates, key=lambda x: (self.track_start_times[x[0]], x[3])):
                         track_id, cls, conf, y_center = candidate
                         sort_char = self.class_to_sort.get(cls, 'C')
@@ -492,10 +501,9 @@ class ACSSGui:
                         self.stats['total'] += 1
                         self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, track {track_id}, y={y_center:.1f}) to {sort_char}")
                         self.sorted_tracks.add(track_id)
-                        self.sort_cooldown = current_time + 0.3  # Faster for 95 RPM
+                        self.sort_cooldown = current_time + 0.3
                         self.root.after(0, self.update_stats)
 
-                    # Fallback for untracked detections
                     for cls, conf, y_center in sorted(untracked_candidates, key=lambda x: x[2]):
                         sort_char = self.class_to_sort.get(cls, 'C')
                         self.send_sort(sort_char)
@@ -512,17 +520,23 @@ class ACSSGui:
                             self.track_start_times.clear()
                         self.last_cleanup = current_time
 
+                # Plot boxes only for display
+                display_frame = results[0].plot() if results and results[0].boxes else frame
+                display_frame = cv2.resize(display_frame, CAM_PREVIEW_SIZE)
+
                 frame_counter += 1
                 if frame_counter >= 10:
                     fps = 10 / (time.time() - fps_time)
-                    self._log_message(f"FPS: {fps:.1f}")
+                    if fps < 10:
+                        self._log_message(f"Low FPS: {fps:.1f}")
                     fps_time = time.time()
                     frame_counter = 0
+                    cv2.putText(display_frame, f"FPS: {fps:.1f}", (10, 25),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-                display_frame = cv2.resize(frame, CAM_PREVIEW_SIZE)
                 self.update_canvas_with_frame(display_frame)
 
-                time.sleep(1/30)
+                time.sleep(0.01)  # Reduced to aim for higher FPS
             except Exception as e:
                 self._log_message(f"Camera loop error: {e}")
                 time.sleep(0.2)

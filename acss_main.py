@@ -42,7 +42,7 @@ CAM_PREVIEW_SIZE = (640, 480)
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
-YOLO_MODEL_PATH = "my_model/my_model.pt"  # Switched to YOLOv11n for testing (auto-downloads)
+YOLO_MODEL_PATH = "my_model/my_model.pt"  # Custom model; use "yolov11n.pt" for lightweight testing
 TRACKER_PATH = "bytetrack.yaml"  # Assume available
 SORT_ZONE_Y = 200  # Top third of 480px frame for sorting
 # ---------------------------------------------------
@@ -145,8 +145,8 @@ class ACSSGui:
         self.cam_canvas.pack(padx=4, pady=4)
 
         self.process_btn = tk.Button(left_frame, text="Start Process",
-                                font=("Arial", 14, "bold"), bg="green", fg="white",
-                                command=self._toggle_process)
+                                    font=("Arial", 14, "bold"), bg="green", fg="white",
+                                    command=self._toggle_process)
         self.process_btn.grid(row=1, column=0, sticky="ew", padx=4, pady=8)
 
         if not PICAMERA2_AVAILABLE or not ULTRALYTICS_AVAILABLE:
@@ -251,9 +251,9 @@ class ACSSGui:
 
         tk.Label(about_frame,
                 text="Automated Copra Segregation System\n\n"
-                    "Version: 1.0\n"
-                    "Developed for Practice and Design 2\n"
-                    "Marinduque State University, 2025",
+                     "Version: 1.0\n"
+                     "Developed for Practice and Design 2\n"
+                     "Marinduque State University, 2025",
                 font=("Arial", 12), justify="center").pack(pady=40)
 
     # ------------------- EXIT ---------------------
@@ -268,8 +268,8 @@ class ACSSGui:
                 font=("Arial", 12)).pack(pady=20)
 
         tk.Button(exit_frame, text="Exit Program", fg="white", bg="red",
-                font=("Arial", 14, "bold"), width=20,
-                command=self._exit_program).pack(pady=30)
+                  font=("Arial", 14, "bold"), width=20,
+                  command=self._exit_program).pack(pady=30)
 
     def _exit_program(self):
         if messagebox.askokcancel("Exit", "Are you sure you want to exit?"):
@@ -307,6 +307,7 @@ class ACSSGui:
         try:
             with self.serial_lock:
                 self.serial.write((text + "\n").encode())
+                self.serial.flush()  # Ensure immediate send
             self._log_message(f"TX -> {text}")
         except Exception as e:
             self._log_message(f"Serial write failed: {e}")
@@ -325,13 +326,13 @@ class ACSSGui:
                 line = self.serial.readline().decode(errors='ignore').strip()
                 if not line:
                     continue
+                # Only log expected messages (AS: or ACK); ignore others (e.g., IR or noise)
                 if line.startswith("AS:"):
                     vals = line[3:].split(",")
                     self._log_message(f"RX <- AS values: {vals}")
                 elif line == "ACK":
                     self._log_message("RX <- ACK from Arduino")
-                else:
-                    self._log_message(f"RX <- {line}")
+                # Silently ignore unexpected messages to prevent log spam
             except Exception as e:
                 self._log_message(f"Serial reader exception: {e}")
                 time.sleep(0.1)
@@ -355,6 +356,7 @@ class ACSSGui:
     def start_camera(self):
         if not PICAMERA2_AVAILABLE:
             self._log_message("picamera2 not available.")
+            self.process_btn.config(state='disabled')
             return
         try:
             self.picam2 = Picamera2()
@@ -369,6 +371,7 @@ class ACSSGui:
             self._log_message("Camera started.")
         except Exception as e:
             self._log_message(f"Camera start failed: {e}")
+            self.process_btn.config(state='disabled')
 
     def stop_camera(self):
         try:
@@ -400,13 +403,13 @@ class ACSSGui:
                             verbose=False
                         )
                     else:
-                        results = self.yolo.predict(  # Fixed: explicit predict
+                        results = self.yolo.predict(
                             source=frame,
                             conf=0.25,
                             max_det=5,
                             verbose=False
                         )
-                    if results and results[0].boxes is not None:  # Null check
+                    if results and results[0].boxes is not None:
                         frame = results[0].plot()
 
                 if self.process_running and results and results[0].boxes and len(results[0].boxes) > 0 and time.time() > self.sort_cooldown:
@@ -414,6 +417,9 @@ class ACSSGui:
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                     conf_tensor = results[0].boxes.conf.cpu().numpy()
+
+                    if len(track_ids) < len(cls_tensor):
+                        self._log_message(f"Warning: Track ID mismatch ({len(track_ids)} IDs vs {len(cls_tensor)} boxes)")
 
                     current_time = time.time()
                     candidates = []
@@ -425,13 +431,11 @@ class ACSSGui:
                                 cls = cls_tensor[i]
                                 conf = conf_tensor[i]
                                 if conf > 0.25:
-                                    # Record track start time (FIFO)
                                     if track_id not in self.track_start_times:
                                         self.track_start_times[track_id] = current_time
                                     candidates.append((track_id, cls, conf, y_center))
 
                     if candidates:
-                        # FIFO: Sort by track creation time, tiebreak by y_center
                         candidates.sort(key=lambda x: (self.track_start_times[x[0]], x[3]))
                         leading = candidates[0]
                         track_id, cls, conf, y_center = leading
@@ -442,10 +446,9 @@ class ACSSGui:
                         self.stats['total'] += 1
                         self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, track {track_id}, y={y_center:.1f}) to {sort_char}")
                         self.sorted_tracks.add(track_id)
-                        self.sort_cooldown = current_time + 1.5  # Reduced for fast conveyor
+                        self.sort_cooldown = current_time + 1.5
                         self.root.after(0, self.update_stats)
 
-                    # Periodic cleanup of old tracks
                     if current_time - self.last_cleanup > 10.0:
                         if len(results[0].boxes) == 0:
                             self.sorted_tracks.clear()
@@ -470,7 +473,7 @@ class ACSSGui:
 
     def update_canvas_with_frame(self, bgr_frame):
         try:
-            rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGRA2RGB)
             if PIL_AVAILABLE:
                 img = Image.fromarray(rgb)
                 imgtk = ImageTk.PhotoImage(img)

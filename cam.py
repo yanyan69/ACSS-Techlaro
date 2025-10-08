@@ -11,7 +11,7 @@ import numpy as np
 from ultralytics import YOLO
 
 # ===== SETTINGS =====
-MODEL_PATH = "my_model/train/weights/best.pt"  # change to your model path
+MODEL_PATH = "my_model/my_model.pt"  # change to your model path
 CONF_THRESH = 0.5
 CAM_SIZE = (640, 480)
 

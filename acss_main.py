@@ -48,7 +48,7 @@ SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
 SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
-FALLBACK_ZONE_Y = 400  # Secondary zone for detections
+FALLBACK_ZONE_Y = 450  # Secondary zone for detections
 
 SORT_DELAY = 1.5  # Seconds from detection to servo actuation
 SERVO_CHUTE_CLEAR_TIME = 1  # Seconds for servo settle and chute clear
@@ -568,7 +568,7 @@ class ACSSGui:
                     yolo_start = time.time()
                     results = self.yolo.predict(
                         source=frame,
-                        conf=0.3,
+                        conf=0.5,
                         max_det=3,
                         verbose=False
                     )

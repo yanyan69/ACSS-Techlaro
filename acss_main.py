@@ -50,7 +50,7 @@ YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
 SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
 FALLBACK_ZONE_Y = 400  # Secondary zone for detections
 
-SORT_DELAY = 1.75  # Seconds from detection to servo actuation
+SORT_DELAY = 1.5  # Seconds from detection to servo actuation
 SERVO_CHUTE_CLEAR_TIME = 1  # Seconds for servo settle and chute clear
 POST_SORT_ADVANCE = 1  # Seconds to run conveyor post-sort to position next copra
 DROP_DELAY = 1  # Seconds from servo actuation to bin drop (for stats)

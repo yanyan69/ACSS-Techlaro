@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Minimal YOLO + Camera Detection Reference
-- Works with PiCamera2 or USB camera
-- Displays live preview with bounding boxes and FPS
+Fixed YOLO + Camera Detection Reference
+- Auto-detects PiCamera2 or USB
+- Converts 4-channel frame to 3-channel (for YOLO)
+- Displays bounding boxes + FPS
 """
 
 import time
@@ -10,12 +11,11 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-# ===== SETTINGS =====
-MODEL_PATH = "my_model/my_model.pt"  # change to your model path
+MODEL_PATH = "my_model/my_model.pt"  # change this
 CONF_THRESH = 0.5
 CAM_SIZE = (640, 480)
 
-# Try to use PiCamera2; fallback to USB camera if not available
+# ===== CAMERA SETUP =====
 try:
     from picamera2 import Picamera2
     picam2 = Picamera2()
@@ -31,16 +31,15 @@ except Exception:
     use_picam = False
     print("🎥 Using USB camera")
 
-# Load YOLO model
+# ===== MODEL =====
 model = YOLO(MODEL_PATH)
 labels = model.names
 print("✅ YOLO model loaded.")
 
-# Bounding box colors (3 classes example)
 bbox_colors = {
-    0: (68, 148, 228),  # Blue
-    1: (88, 159, 106),  # Green
-    2: (164, 120, 87)   # Brown
+    0: (68, 148, 228),
+    1: (88, 159, 106),
+    2: (164, 120, 87)
 }
 
 # ===== MAIN LOOP =====
@@ -54,11 +53,14 @@ while True:
         print("⚠️ No frame captured.")
         break
 
-    # Run YOLO detection
+    # 🔧 Fix: Convert 4-channel (RGBA) → 3-channel (BGR)
+    if frame.shape[2] == 4:
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+
+    # Run YOLO
     results = model(frame, verbose=False)
     detections = results[0].boxes
 
-    # Draw boxes
     for det in detections:
         conf = float(det.conf)
         if conf >= CONF_THRESH:
@@ -66,16 +68,13 @@ while True:
             label = labels[cls_id]
             color = bbox_colors.get(cls_id % 3, (0, 255, 0))
             x1, y1, x2, y2 = map(int, det.xyxy[0].tolist())
-
-            # Draw box + label
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            label_text = f"{label} {conf*100:.1f}%"
-            (w, h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            text = f"{label} {conf*100:.1f}%"
+            (w, h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             cv2.rectangle(frame, (x1, y1 - h - 6), (x1 + w, y1), color, -1)
-            cv2.putText(frame, label_text, (x1, y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+            cv2.putText(frame, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
-    # Calculate FPS
+    # FPS overlay
     fps = 1.0 / (time.time() - t1)
     frame_times.append(fps)
     if len(frame_times) > 30:

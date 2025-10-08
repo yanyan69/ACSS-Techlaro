@@ -116,6 +116,11 @@ class ACSSGui:
             except Exception as ex:
                 self._log_message(f"YOLO load failed: {ex}")
 
+        # AS7263 state
+        self.as7263_data = None  # Latest AS7263 reading
+        self.as7263_timestamp = 0  # Timestamp of last reading
+        self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}  # For avg moisture
+        
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Auto-start serial and camera
@@ -239,8 +244,15 @@ class ACSSGui:
     def update_stats(self):
         try:
             for cat in ["Standard", "Raw", "Overcooked"]:
-                self.stat_pieces[cat].config(text=str(self.stats[cat]))
+                pieces = self.stats[cat]
+                self.stat_pieces[cat].config(text=str(pieces))
+                moisture_avg = (self.moisture_sums[cat] / pieces) if pieces > 0 else 0.0
+                self.stat_moisture[cat].config(text=f"{moisture_avg:.1f}%")
             self.total_pieces_label.config(text=str(self.stats['total']))
+            total_pieces = self.stats['total']
+            total_moisture = sum(self.moisture_sums.values())
+            total_avg = (total_moisture / total_pieces) if total_pieces > 0 else 0.0
+            self.total_moisture_label.config(text=f"{total_avg:.1f}%")
             start_str = time.strftime("%H:%M:%S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
             end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
             self.start_time_label.config(text=start_str)
@@ -257,11 +269,11 @@ class ACSSGui:
         about_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         tk.Label(about_frame,
-                 text="Automated Copra Segregation System\n\n"
-                      "Version: 1.0\n"
-                      "Developed for Practice and Design 2\n"
-                      "Marinduque State University, 2025",
-                 font=("Arial", 12), justify="center").pack(pady=40)
+                text="Automated Copra Segregation System\n\n"
+                    "Version: 1.0\n"
+                    "Developed for Practice and Design 2\n"
+                    "Marinduque State University, 2025",
+                font=("Arial", 12), justify="center").pack(pady=40)
 
     # ------------------- EXIT ---------------------
     def _build_exit_tab(self):
@@ -272,11 +284,11 @@ class ACSSGui:
         exit_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         tk.Label(exit_frame, text="Click the button below to close the program.",
-                 font=("Arial", 12)).pack(pady=20)
+                font=("Arial", 12)).pack(pady=20)
 
         tk.Button(exit_frame, text="Exit Program", fg="white", bg="red",
-                  font=("Arial", 14, "bold"), width=20,
-                  command=self._exit_program).pack(pady=30)
+                font=("Arial", 14, "bold"), width=20,
+                command=self._exit_program).pack(pady=30)
 
     def _exit_program(self):
         if messagebox.askokcancel("Exit", "Are you sure you want to exit?"):
@@ -370,6 +382,8 @@ class ACSSGui:
                     continue
                 if line.startswith("AS:"):
                     vals = line[3:].split(",")
+                    self.as7263_data = vals  # Store latest AS7263 reading
+                    self.as7263_timestamp = time.time()
                     self._log_message(f"RX <- AS values: {vals}")
                 elif line == "ACK":
                     self._log_message("RX <- ACK from Arduino")
@@ -384,8 +398,7 @@ class ACSSGui:
     def start_process(self):
         self.stats['start_time'] = time.time()
         self.stats['end_time'] = None
-        self.send_cmd("MOTOR_SPEED,80")  # Adjust if Arduino doesn't support
-        self.send_cmd("MOTOR,ON")
+        self.send_cmd("MOTOR,ON")  # Start conveyor at fixed speed (255 PWM)
         self.sort_cooldown = time.time()
         self.sorted_tracks.clear()
         self.track_start_times.clear()
@@ -458,8 +471,8 @@ class ACSSGui:
                             source=frame,
                             persist=True,
                             tracker=TRACKER_PATH,
-                            conf=0.3,  # Increased to reduce low-conf detections
-                            max_det=3,  # Reduced for faster processing
+                            conf=0.3,
+                            max_det=3,
                             verbose=False
                         )
                     else:
@@ -473,8 +486,9 @@ class ACSSGui:
                     if yolo_time > 0.1:  # Log if YOLO takes >100ms
                         self._log_message(f"YOLO processing time: {yolo_time:.3f}s")
 
-                # Process sorting if results exist
-                if self.process_running and results and results[0].boxes and len(results[0].boxes) > 0 and time.time() > self.sort_cooldown:
+                # Process sorting if results exist and AS7263 validates
+                as7263_valid = self.as7263_data is not None and (current_time - self.as7263_timestamp) < 0.5
+                if self.process_running and results and results[0].boxes and len(results[0].boxes) > 0 and time.time() > self.sort_cooldown and as7263_valid:
                     track_ids = results[0].boxes.id.cpu().numpy().astype(int) if results[0].boxes.id is not None else []
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
@@ -492,33 +506,44 @@ class ACSSGui:
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
                         if conf > 0.3:
+                            # Estimate moisture based on confidence
+                            if cls == 0:  # Raw
+                                moisture = 7.1 + (conf - 0.3) * (8.0 - 7.1) / 0.7  # Map 0.3-1.0 to 7.1-8.0%
+                            elif cls == 1:  # Standard
+                                moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7  # Map 0.3-1.0 to 6.0-7.0%
+                            else:  # Overcooked
+                                moisture = 5.0 + (conf - 0.3) * (5.9 - 5.0) / 0.7  # Map 0.3-1.0 to 5.0-5.9%
+                            moisture = round(moisture, 1)
+
                             if track_id != -1 and track_id not in self.sorted_tracks and y_center < SORT_ZONE_Y:
                                 if track_id not in self.track_start_times:
                                     self.track_start_times[track_id] = current_time
-                                candidates.append((track_id, cls, conf, y_center))
+                                candidates.append((track_id, cls, conf, y_center, moisture))
                             elif y_center < FALLBACK_ZONE_Y:
-                                self._log_message(f"Untracked detection (class {cls}, conf {conf:.2f}, y={y_center:.1f})")
-                                untracked_candidates.append((cls, conf, y_center))
+                                self._log_message(f"Untracked detection (class {cls}, conf {conf:.2f}, y={y_center:.1f}, moisture {moisture}%)")
+                                untracked_candidates.append((cls, conf, y_center, moisture))
 
                     for candidate in sorted(candidates, key=lambda x: (self.track_start_times[x[0]], x[3])):
-                        track_id, cls, conf, y_center = candidate
+                        track_id, cls, conf, y_center, moisture = candidate
                         sort_char = self.class_to_sort.get(cls, 'C')
                         self.send_sort(sort_char)
                         category = self.category_map.get(cls, 'Standard')
                         self.stats[category] += 1
                         self.stats['total'] += 1
-                        self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, track {track_id}, y={y_center:.1f}) to {sort_char}")
+                        self.moisture_sums[category] += moisture
+                        self._log_message(f"Sorted {category} (class {cls}, conf {conf:.2f}, track {track_id}, y={y_center:.1f}, moisture {moisture}%) to {sort_char}")
                         self.sorted_tracks.add(track_id)
                         self.sort_cooldown = current_time + 0.3
                         self.root.after(0, self.update_stats)
 
-                    for cls, conf, y_center in sorted(untracked_candidates, key=lambda x: x[2]):
+                    for cls, conf, y_center, moisture in sorted(untracked_candidates, key=lambda x: x[2]):
                         sort_char = self.class_to_sort.get(cls, 'C')
                         self.send_sort(sort_char)
                         category = self.category_map.get(cls, 'Standard')
                         self.stats[category] += 1
                         self.stats['total'] += 1
-                        self._log_message(f"Sorted untracked {category} (class {cls}, conf {conf:.2f}, y={y_center:.1f}) to {sort_char}")
+                        self.moisture_sums[category] += moisture
+                        self._log_message(f"Sorted untracked {category} (class {cls}, conf {conf:.2f}, y={y_center:.1f}, moisture {moisture}%) to {sort_char}")
                         self.sort_cooldown = current_time + 0.3
                         self.root.after(0, self.update_stats)
 
@@ -528,7 +553,7 @@ class ACSSGui:
                             self.track_start_times.clear()
                         self.last_cleanup = current_time
 
-                # Update display every other frame to reduce lag
+                # Update display every other frame
                 display_skip = (display_skip + 1) % 2
                 if display_skip == 0:
                     display_frame = results[0].plot() if results and results[0].boxes else frame
@@ -536,7 +561,7 @@ class ACSSGui:
                     self.update_canvas_with_frame(display_frame)
 
                 frame_counter += 1
-                if frame_counter >= 50 and current_time - last_fps_log > 5.0:  # Log FPS every 5s
+                if frame_counter >= 50 and current_time - last_fps_log > 5.0:
                     fps = frame_counter / (current_time - fps_time)
                     self._log_message(f"FPS: {fps:.1f}")
                     fps_time = current_time

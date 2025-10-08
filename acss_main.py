@@ -37,10 +37,10 @@ except:
 
 # ------------------ USER SETTINGS ------------------
 CAM_PREVIEW_SIZE = (640, 480)
-USERNAME = "User001"
+USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
-YOLO_MODEL_PATH = "my_model/train/weights/best.pt"
+YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"  # Assume available
 # ---------------------------------------------------
 
@@ -135,8 +135,8 @@ class ACSSGui:
         self.cam_canvas.pack(padx=4, pady=4)
 
         self.process_btn = tk.Button(left_frame, text="Start Process",
-                                   font=("Arial", 14, "bold"), bg="green", fg="white",
-                                   command=self._toggle_process)
+                                font=("Arial", 14, "bold"), bg="green", fg="white",
+                                command=self._toggle_process)
         self.process_btn.grid(row=1, column=0, sticky="ew", padx=4, pady=8)
 
         if not PICAMERA2_AVAILABLE or not ULTRALYTICS_AVAILABLE:
@@ -232,11 +232,11 @@ class ACSSGui:
         about_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         tk.Label(about_frame,
-                 text="Automated Copra Segregation System\n\n"
-                      "Version: 1.0 (GUI Prototype)\n"
-                      "Developed for Technopreneurship Project\n"
-                      "Marinduque State University, 2025",
-                 font=("Arial", 12), justify="center").pack(pady=40)
+                text="Automated Copra Segregation System\n\n"
+                    "Version: 1.0\n"
+                    "Developed for Practice and Design 2\n"
+                    "Marinduque State University, 2025",
+                font=("Arial", 12), justify="center").pack(pady=40)
 
     # ------------------- EXIT ---------------------
     def _build_exit_tab(self):
@@ -247,11 +247,11 @@ class ACSSGui:
         exit_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         tk.Label(exit_frame, text="Click the button below to close the program.",
-                 font=("Arial", 12)).pack(pady=20)
+                font=("Arial", 12)).pack(pady=20)
 
         tk.Button(exit_frame, text="Exit Program", fg="white", bg="red",
-                  font=("Arial", 14, "bold"), width=20,
-                  command=self._exit_program).pack(pady=30)
+                font=("Arial", 14, "bold"), width=20,
+                command=self._exit_program).pack(pady=30)
 
     def _exit_program(self):
         if messagebox.askokcancel("Exit", "Are you sure you want to exit?"):

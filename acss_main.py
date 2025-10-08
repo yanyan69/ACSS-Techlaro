@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-ACSS GUI with Tabs, Process Control, YOLO Tracking, FIFO Sorting, and Servo Fixes.
-AS7263 light disabled, IR logging removed, fixed track mismatches, ignored copra,
-Tkinter config error, and mitigated PDAF errors.
-Optimized for 95 RPM conveyor at 80% speed.
+ACSS GUI with Tabs, Process Control, and Servo Fixes.
+- Optimized for 95 RPM conveyor at 80% speed.
+- Uses old code's motor/servo control for debugging-friendliness.
+- AS7263 LED lights for 1s per YOLO detection, no AS7263 logs.
+- Removed TX logs, moved YOLO processing time to console.
 """
 
 import tkinter as tk
@@ -41,13 +42,13 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (640, 480)  # Reverted for higher resolution
+CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution as requested
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Use "yolov11n.pt" for lightweight testing
 SORT_ZONE_Y = 350  # Top ~73% of 480px frame for primary sorting
-FALLBACK_ZONE_Y = 400  # Secondary zone for untracked copra
+FALLBACK_ZONE_Y = 400  # Secondary zone for detections
 # ---------------------------------------------------
 
 class ACSSGui:
@@ -104,21 +105,20 @@ class ACSSGui:
         self.sort_queue = deque()  # Queue for pending sorts
         self.serial_error_logged = False  # Prevent serial error spam
 
-        # Load YOLO if available
-        if ULTRALYTICS_AVAILABLE:
-            try:
-                self._log_message("Loading YOLO model...")
-                self.yolo = YOLO(YOLO_MODEL_PATH)
-                self._log_message(f"YOLO model loaded: {YOLO_MODEL_PATH}")
-            except Exception as ex:
-                self._log_message(f"YOLO load failed: {ex}")
-
         # AS7263 state
         self.as7263_data = None  # Latest AS7263 reading
         self.as7263_timestamp = 0  # Timestamp of last reading
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}  # For avg moisture
         
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Load YOLO if available
+        if ULTRALYTICS_AVAILABLE:
+            try:
+                print("Loading YOLO model...")  # Console only
+                self.yolo = YOLO(YOLO_MODEL_PATH)
+                print(f"YOLO model loaded: {YOLO_MODEL_PATH}")
+            except Exception as ex:
+                self._log_message(f"YOLO load failed: {ex}")
+                print(f"YOLO load failed: {ex}")
 
         # Auto-start serial and camera
         self.open_serial()
@@ -130,6 +130,8 @@ class ACSSGui:
         # Disable process button if no serial
         if not SERIAL_AVAILABLE:
             self.process_btn.config(state='disabled')
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # -------------------- HOME --------------------
     def _build_home_tab(self):
@@ -267,11 +269,11 @@ class ACSSGui:
         about_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         tk.Label(about_frame,
-                text="Automated Copra Segregation System\n\n"
-                    "Version: 1.0\n"
-                    "Developed for Practice and Design 2\n"
-                    "Marinduque State University, 2025",
-                font=("Arial", 12), justify="center").pack(pady=40)
+                 text="Automated Copra Segregation System\n\n"
+                      "Version: 1.0\n"
+                      "Developed for Practice and Design 2\n"
+                      "Marinduque State University, 2025",
+                 font=("Arial", 12), justify="center").pack(pady=40)
 
     # ------------------- EXIT ---------------------
     def _build_exit_tab(self):
@@ -282,11 +284,11 @@ class ACSSGui:
         exit_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         tk.Label(exit_frame, text="Click the button below to close the program.",
-                font=("Arial", 12)).pack(pady=20)
+                 font=("Arial", 12)).pack(pady=20)
 
         tk.Button(exit_frame, text="Exit Program", fg="white", bg="red",
-                font=("Arial", 14, "bold"), width=20,
-                command=self._exit_program).pack(pady=30)
+                  font=("Arial", 14, "bold"), width=20,
+                  command=self._exit_program).pack(pady=30)
 
     def _exit_program(self):
         if messagebox.askokcancel("Exit", "Are you sure you want to exit?"):
@@ -294,54 +296,63 @@ class ACSSGui:
 
     # ---------- Serial Methods ----------
     def open_serial(self):
-        if not SERIAL_AVAILABLE:
-            self._log_message("pyserial not available.")
-            self.process_btn.config(state='disabled')
-            return
-        if self.serial and self.serial.is_open:
-            self._log_message("Serial already open.")
-            return
         try:
+            if not SERIAL_AVAILABLE:
+                self._log_message("pyserial not available.")
+                print("pyserial not available.")
+                return
+            if self.serial and self.serial.is_open:
+                self._log_message("Serial already open.")
+                return
             self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
             self._log_message(f"Opened serial {SERIAL_PORT}@{SERIAL_BAUD}")
+            print(f"Opened serial {SERIAL_PORT}@{SERIAL_BAUD}")
             self.serial_reader_thread_obj = threading.Thread(target=self.serial_reader_thread, daemon=True)
             self.serial_reader_thread_obj.start()
             self._log_message("Serial reader thread started.")
-            self.send_cmd("AS_OFF")
         except Exception as e:
             self._log_message(f"Failed to open serial: {e}")
-            self.process_btn.config(state='disabled')
+            print(f"Failed to open serial: {e}")
 
     def close_serial(self):
         try:
             if self.serial and self.serial.is_open:
                 self.serial.close()
                 self._log_message("Serial closed.")
+                print("Serial closed.")
         except Exception as e:
             self._log_message(f"Error closing serial: {e}")
+            print(f"Error closing serial: {e}")
 
     def send_cmd(self, text):
-        if not self.serial or not self.serial.is_open:
-            self._log_message(f"Serial not open. Cannot send: {text}")
-            return
-        for _ in range(2):  # Retry once on failure
-            try:
-                with self.serial_lock:
-                    self.serial.write((text + "\n").encode())
-                    self.serial.flush()
+        """Send any general command to Arduino with newline + flush"""
+        try:
+            if not self.serial or not self.serial.is_open:
+                self._log_message(f"Serial not open — can't send: {text}")
+                print(f"Serial not open — can't send: {text}")
                 return
-            except Exception as e:
-                if not self.serial_error_logged:
-                    self._log_message(f"Serial write failed: {e}")
-                    self.serial_error_logged = True
-                time.sleep(0.1)
+            full_cmd = (text.strip().upper() + "\n").encode('utf-8')
+            with self.serial_lock:
+                self.serial.write(full_cmd)
+                self.serial.flush()
+        except Exception as e:
+            self._log_message(f"Failed to send command '{text}': {e}")
+            print(f"Failed to send command '{text}': {e}")
 
     def send_sort(self, char):
-        if char not in ('L', 'C', 'R'):
-            self._log_message(f"Invalid sort direction: {char}")
-            return
-        self.sort_queue.append(char)
-        self._process_sort_queue()
+        """Send servo sort command (L, C, R)."""
+        try:
+            char = char.strip().upper()
+            if char not in ("L", "C", "R"):
+                self._log_message(f"Invalid servo command: {char}")
+                print(f"Invalid servo command: {char}")
+                return
+            cmd = f"SORT,{char}"
+            self.sort_queue.append(char)
+            self._process_sort_queue()
+        except Exception as e:
+            self._log_message(f"Servo send_sort failed: {e}")
+            print(f"Servo send_sort failed: {e}")
 
     def _process_sort_queue(self):
         if not self.sort_queue or time.time() < self.sort_cooldown:
@@ -361,55 +372,95 @@ class ACSSGui:
                         break
                 if not got_ack:
                     self._log_message(f"No ACK for SORT,{char}")
+                    print(f"No ACK for SORT,{char}")
                     self.sort_queue.append(char)
         except Exception as e:
-            if not self.serial_error_logged:
-                self._log_message(f"Sort failed: {e}")
-                self.serial_error_logged = True
+            self._log_message(f"Sort failed: {e}")
+            print(f"Sort failed: {e}")
             self.sort_queue.append(char)
 
     def serial_reader_thread(self):
-        while self.serial and self.serial.is_open and self.running:
-            try:
-                line = self.serial.readline().decode(errors='ignore').strip()
-                if not line:
-                    continue
-                if line.startswith("AS:"):
-                    vals = line[3:].split(",")
-                    self.as7263_data = vals  # Store latest AS7263 reading
-                    self.as7263_timestamp = time.time()
-                elif line == "ACK":
-                    pass  # Silently handle ACK
-                # Silently ignore other messages
-            except Exception as e:
-                if not self.serial_error_logged:
-                    self._log_message(f"Serial reader exception: {e}")
-                    self.serial_error_logged = True
-                time.sleep(0.1)
+        self._log_message("Serial reader started.")
+        print("Serial reader started.")
+        try:
+            while self.serial and self.serial.is_open and self.running:
+                try:
+                    line = self.serial.readline().decode(errors='ignore').strip()
+                    if not line:
+                        continue
+                    if line.startswith("AS:"):
+                        vals = line[3:].split(",")
+                        self.as7263_data = vals  # Store latest AS7263 reading
+                        self.as7263_timestamp = time.time()
+                    elif line == "ACK":
+                        pass  # Silently handle ACK
+                    # Silently ignore other messages
+                except Exception as e:
+                    if not self.serial_error_logged:
+                        self._log_message(f"Serial reader exception: {e}")
+                        print(f"Serial reader exception: {e}")
+                        self.serial_error_logged = True
+                    time.sleep(0.2)
+        except Exception as outer:
+            self._log_message(f"Serial reader crashed: {outer}")
+            print(f"Serial reader crashed: {outer}")
 
     # ---------- Process Control ----------
     def start_process(self):
-        self.stats['start_time'] = time.time()
-        self.stats['end_time'] = None
-        self.send_cmd("MOTOR,ON")  # Start conveyor at fixed speed (255 PWM)
-        self.sort_cooldown = time.time()
-        self.as_led_cooldown = time.time()  # Reset LED cooldown
-        self.sort_queue.clear()
-        self.serial_error_logged = False
-        self.root.after(0, self.update_stats)
+        try:
+            if not (self.serial and self.serial.is_open):
+                self._log_message("Open serial first.")
+                print("Open serial first.")
+                return
+            if not self.yolo:
+                self._log_message("YOLO model not loaded.")
+                print("YOLO model not loaded.")
+                return
+            if self.process_running:
+                self._log_message("Process already running.")
+                print("Process already running.")
+                return
+            self.send_cmd("MOTOR,ON")
+            self.stats['start_time'] = time.time()
+            self.stats['end_time'] = None
+            self.sort_cooldown = time.time()
+            self.as_led_cooldown = time.time()
+            self.sort_queue.clear()
+            self.serial_error_logged = False
+            self._log_message("Process started: Motor ON, detection active.")
+            print("Process started: Motor ON, detection active.")
+            self.root.after(0, self.update_stats)
+        except Exception as e:
+            self._log_message(f"Start process error: {e}")
+            print(f"Start process error: {e}")
 
     def stop_process(self):
-        self.send_cmd("MOTOR,OFF")
-        self.stats['end_time'] = time.time()
-        self.sort_queue.clear()
-        self.serial_error_logged = False
-        self.as_led_cooldown = time.time()  # Reset LED cooldown
-        self.root.after(0, self.update_stats)
+        try:
+            if not self.process_running:
+                self._log_message("Process not running.")
+                print("Process not running.")
+                return
+            self.send_cmd("MOTOR,OFF")
+            self.stats['end_time'] = time.time()
+            self.sort_queue.clear()
+            self.serial_error_logged = False
+            self.as_led_cooldown = time.time()
+            self._log_message("Process stopped: Motor OFF, detection inactive.")
+            print("Process stopped: Motor OFF, detection inactive.")
+            self.root.after(0, self.update_stats)
+        except Exception as e:
+            self._log_message(f"Stop process error: {e}")
+            print(f"Stop process error: {e}")
 
     # ---------- Camera Methods ----------
     def start_camera(self):
+        if self.camera_running:
+            self._log_message("Camera already running.")
+            print("Camera already running.")
+            return
         if not PICAMERA2_AVAILABLE:
             self._log_message("picamera2 not available.")
+            print("picamera2 not available.")
             self.process_btn.config(state='disabled')
             return
         try:
@@ -423,19 +474,27 @@ class ACSSGui:
             self.camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
             self.camera_thread.start()
             self._log_message("Camera started.")
+            print("Camera started.")
         except Exception as e:
             self._log_message(f"Camera start failed: {e}")
+            print(f"Camera start failed: {e}")
             self.process_btn.config(state='disabled')
 
     def stop_camera(self):
         try:
+            if not self.camera_running:
+                self._log_message("Camera not running.")
+                print("Camera not running.")
+                return
             self.camera_running = False
             if self.picam2:
                 self.picam2.stop()
                 self.picam2 = None
             self._log_message("Camera stopped.")
+            print("Camera stopped.")
         except Exception as e:
             self._log_message(f"Camera stop error: {e}")
+            print(f"Camera stop error: {e}")
 
     def camera_loop(self):
         frame_counter = 0
@@ -453,6 +512,7 @@ class ACSSGui:
                 current_time = time.time()
                 if current_time - last_frame_time > 0.2 and current_time - last_drop_log > 5.0:
                     self._log_message(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
+                    print(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
                     last_drop_log = current_time
                 last_frame_time = current_time
 
@@ -520,12 +580,14 @@ class ACSSGui:
                 if frame_counter >= 50 and current_time - last_fps_log > 5.0:
                     fps = frame_counter / (current_time - fps_time)
                     self._log_message(f"FPS: {fps:.1f}")
+                    print(f"FPS: {fps:.1f}")
                     fps_time = time.time()
                     frame_counter = 0
 
                 time.sleep(0.01)
             except Exception as e:
                 self._log_message(f"Camera loop error: {e}")
+                print(f"Camera loop error: {e}")
                 time.sleep(0.2)
 
     def update_canvas_with_frame(self, bgr_frame):
@@ -541,6 +603,7 @@ class ACSSGui:
                 cv2.waitKey(1)
         except Exception as e:
             self._log_message(f"Display frame error: {e}")
+            print(f"Display frame error: {e}")
 
     # ---------- Shutdown ----------
     def on_close(self):
@@ -558,6 +621,7 @@ class ACSSGui:
         except:
             pass
         self._log_message("Application closed.")
+        print("Application closed.")
         self.root.destroy()
 
 

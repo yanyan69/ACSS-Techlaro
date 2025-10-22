@@ -99,6 +99,7 @@ class ACSSGui:
         # Arduino camera index event (ACK,AT_CAM)
         self.at_cam_event = threading.Event()
         self.at_cam_idx = None  # store index from ACK,AT_CAM
+        self.classification_thread = None
 
         # Load YOLO (non-blocking attempt)
         if ULTRALYTICS_AVAILABLE:
@@ -303,12 +304,8 @@ class ACSSGui:
                 try:
                     line = self.serial.readline().decode(errors='ignore').strip()
                     if not line: continue
-                    # AS data (optional, not used for classification)
-                    if line.startswith("AS:"):
-                        vals = line[3:].split(",")
-                        self._log_message(f"NIR data received: {vals}")
                     # Item at camera (ACK,AT_CAM,...)
-                    elif line.startswith("ACK,AT_CAM"):
+                    if line.startswith("ACK,AT_CAM"):
                         parts = line.split(",")
                         # look for IDX=... in remaining parts
                         idx_val = None
@@ -445,66 +442,15 @@ class ACSSGui:
                         self.frame_drop_logged = True
                 last_frame_time = current_time
 
-                results = None
-                # Only attempt detection if process is running and there's a camera-at-item event
-                if self.yolo and self.process_running and self.at_cam_event.is_set():
-                    try:
-                        t0 = time.time()
-                        results = self.yolo.predict(source=frame, conf=0.3, max_det=3, verbose=False)
-                        t1 = time.time()
-                        self._log_message(f"YOLO inference time: {t1 - t0:.3f}s")
-                    except Exception as ex:
-                        if self.yolo_log_suppressed:
-                            self._log_message(f"YOLO predict error: {ex}")
-                            self.yolo_log_suppressed = False
-                        results = None
+                # Check if classification is needed and not already processing
+                if self.yolo and self.process_running and self.at_cam_event.is_set() and (self.classification_thread is None or not self.classification_thread.is_alive()):
+                    self.at_cam_event.clear()  # Clear event immediately to avoid multiple triggers
+                    frame_copy = frame.copy()  # Copy frame for thread
+                    self.classification_thread = threading.Thread(target=self.do_classification, args=(frame_copy,), daemon=True)
+                    self.classification_thread.start()
 
-                has_detection = results and results[0].boxes and len(results[0].boxes) > 0
-
-                if has_detection and self.process_running and self.at_cam_event.is_set():
-                    boxes = results[0].boxes.xyxy.cpu().numpy()
-                    cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
-                    conf_tensor = results[0].boxes.conf.cpu().numpy()
-                    candidates = []
-                    for i in range(len(cls_tensor)):
-                        y_center = (boxes[i, 1] + boxes[i, 3]) / 2
-                        cls = cls_tensor[i]
-                        conf = conf_tensor[i]
-                        if conf > 0.3 and y_center < FALLBACK_ZONE_Y:
-                            # compute moisture approximation (kept your heuristics)
-                            if cls == 0:
-                                moisture = 4.0 + (conf - 0.3) * (6.0 - 4.0) / 0.7
-                            elif cls == 1:
-                                moisture = 7.1 + (conf - 0.3) * (14.0 - 7.1) / 0.7
-                            elif cls == 2:
-                                moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
-                            else:
-                                cls = 0
-                                moisture = 4.0
-                            moisture = round(moisture, 1)
-                            candidates.append((cls, conf, y_center, moisture))
-                    if candidates:
-                        # choose the candidate closest to top (smallest y_center)
-                        candidates.sort(key=lambda x: x[2])
-                        leading = candidates[0]
-                        cls, conf, y_center, moisture = leading
-                        category = self.category_map.get(cls, 'Overcooked')
-                        # Log classification before sending to ensure it appears before NIR logs
-                        self._log_message(f"Classified {category} (moisture {moisture:.1f}%) conf {conf:.2f} idx={self.at_cam_idx}")
-                        # Send classification and update stats if successful
-                        ok = self.send_classification(category)
-                        if ok:
-                            self._update_stats_after_drop(category, moisture)
-                        # clear the at_cam_event so we don't classify the same item repeatedly
-                        self.at_cam_event.clear()
-
-                # prepare frame for display
+                # prepare frame for display (without bounding boxes since classification is offloaded)
                 display_frame = frame
-                if results and results[0].boxes:
-                    try:
-                        display_frame = results[0].plot()
-                    except Exception:
-                        display_frame = frame
                 if CV2_AVAILABLE and display_frame is not None:
                     display_frame = cv2.resize(display_frame, CAM_PREVIEW_SIZE)
                 self.update_canvas_with_frame(display_frame)
@@ -512,6 +458,53 @@ class ACSSGui:
             except Exception as e:
                 self._log_message(f"Camera loop error: {e}")
                 time.sleep(0.2)
+
+    def do_classification(self, frame):
+        try:
+            t0 = time.time()
+            results = self.yolo.predict(source=frame, conf=0.3, max_det=3, verbose=False)
+            t1 = time.time()
+            self._log_message(f"YOLO inference time: {t1 - t0:.3f}s")
+
+            has_detection = results and results[0].boxes and len(results[0].boxes) > 0
+
+            if has_detection:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
+                conf_tensor = results[0].boxes.conf.cpu().numpy()
+                candidates = []
+                for i in range(len(cls_tensor)):
+                    y_center = (boxes[i, 1] + boxes[i, 3]) / 2
+                    cls = cls_tensor[i]
+                    conf = conf_tensor[i]
+                    if conf > 0.3 and y_center < FALLBACK_ZONE_Y:
+                        # compute moisture approximation (kept your heuristics)
+                        if cls == 0:
+                            moisture = 4.0 + (conf - 0.3) * (6.0 - 4.0) / 0.7
+                        elif cls == 1:
+                            moisture = 7.1 + (conf - 0.3) * (14.0 - 7.1) / 0.7
+                        elif cls == 2:
+                            moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
+                        else:
+                            cls = 0
+                            moisture = 4.0
+                        moisture = round(moisture, 1)
+                        candidates.append((cls, conf, y_center, moisture))
+                if candidates:
+                    # choose the candidate closest to top (smallest y_center)
+                    candidates.sort(key=lambda x: x[2])
+                    leading = candidates[0]
+                    cls, conf, y_center, moisture = leading
+                    category = self.category_map.get(cls, 'Overcooked')
+                    # Log classification before sending to ensure it appears before NIR logs
+                    self._log_message(f"Classified {category} (moisture {moisture:.1f}%) conf {conf:.2f} idx={self.at_cam_idx}")
+                    # Send classification and update stats if successful
+                    ok = self.send_classification(category)
+                    if ok:
+                        self._update_stats_after_drop(category, moisture)
+                    self.send_cmd("AS_BULB_ON")  # Light up NIR right after classification
+        except Exception as e:
+            self._log_message(f"Classification thread error: {e}")
 
     def update_canvas_with_frame(self, bgr_frame):
         try:

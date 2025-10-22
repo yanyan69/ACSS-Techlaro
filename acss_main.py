@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-ACSS GUI (Auto mode) - FIFO-aware, fully automated.
-- Start/Stop removed: processing auto-starts when serial, camera, and YOLO are available.
-- Classifications sent to Arduino as: ASSIGN_CLASS,IDX=<idx>,CLASS=<category>
-  (falls back to ASSIGN_CLASS,CLASS=<category> if idx is unknown).
-- Retains FIFO queueing and the rest of your app structure.
+ACSS GUI (AUTO) - RPi sends only classification strings to Arduino.
+- When Arduino sends ACK,AT_CAM the RPi will attempt to classify the current frame
+  (YOLO if available, otherwise fallback random) and send a single-line class:
+    RAW\n or STANDARD\n or OVERCOOKED\n
+- Arduino is expected to handle indexing & physical sorting. The RPi keeps local
+  stats by queuing detections and updating counts when Arduino signals flapper
+  arrival (TRIG,FLAP_OBJECT_DETECTED).
+- UI and setup retained from original file.
 """
+
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import sys, threading, time
@@ -53,15 +57,13 @@ USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200
 YOLO_MODEL_PATH = "my_model/my_model.pt"
-SORT_ZONE_Y = 240
 FALLBACK_ZONE_Y = 100
-SORT_DELAY = 1.3
 SERVO_CHUTE_CLEAR_TIME = 1
-POST_SORT_ADVANCE = 0
 DROP_DELAY = 1
 AS_BULB_DELAY = 0.5
 DETECTION_COOLDOWN = 1
 # ----------------------------------------------------
+
 
 class ACSSGui:
     def __init__(self, root):
@@ -89,7 +91,7 @@ class ACSSGui:
 
         # State
         self.camera_running = False
-        self.process_running = False   # will be set true automatically when ready
+        self.process_running = False   # auto-start when ready
         self.serial = None
         self.serial_lock = threading.Lock()
         self.running = True
@@ -99,12 +101,6 @@ class ACSSGui:
         self.frame_lock = threading.Lock()
         self.latest_frame = None
         self.serial_reader_thread_obj = None
-        self.latest_detection = None
-        self.as_request_cooldown = 0
-        self.detection_cooldown = 0
-        self.serial_error_logged = False
-        self.frame_drop_logged = False
-        self.yolo_log_suppressed = True
         self.as7263_data = None
         self.as7263_timestamp = 0
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
@@ -112,15 +108,12 @@ class ACSSGui:
         self.category_map = {0: 'Overcooked', 1: 'Raw', 2: 'Standard'}
         self.stats = {'Raw': 0, 'Standard': 0, 'Overcooked': 0, 'total': 0, 'start_time': None, 'end_time': None}
 
-        # Arduino camera index event (ACK,AT_CAM)
+        # Events
         self.at_cam_event = threading.Event()
-        self.at_cam_idx = None  # store index from ACK,AT_CAM
-
-        # FIFO structures (Arduino-aware)
-        self.sort_queue = deque()
+        self.at_cam_idx = None
+        self.sort_queue = deque()  # store detections locally for stats
         self.sort_queue_lock = threading.Lock()
-        self.sort_request_event = threading.Event()  # TRIG,FLAP_OBJECT_DETECTED
-        self.sort_thread = None
+        self.sort_request_event = threading.Event()  # Arduino signals flapper arrival
 
         # Load YOLO (non-blocking attempt)
         if ULTRALYTICS_AVAILABLE:
@@ -131,16 +124,14 @@ class ACSSGui:
             except Exception as ex:
                 self._log_message(f"YOLO load failed: {ex}")
 
-        # Auto-start serial and camera; once all are ready -> auto-start processing
+        # Auto-start serial and camera
         self.open_serial()
         if PICAMERA2_AVAILABLE:
             self.start_camera()
         else:
             self._log_message("picamera2 not available; camera disabled.")
 
-        # Start a watcher thread that starts processing automatically when prerequisites met
         threading.Thread(target=self._auto_start_watcher, daemon=True).start()
-
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---------------- UI BUILD ----------------
@@ -162,7 +153,6 @@ class ACSSGui:
         self.cam_canvas = tk.Canvas(cam_frame, width=CAM_PREVIEW_SIZE[0], height=CAM_PREVIEW_SIZE[1], bg='black')
         self.cam_canvas.pack(padx=4, pady=4)
 
-        # Process control removed; display status instead
         status_frame = tk.Frame(left_frame)
         status_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=8)
         self.status_label = tk.Label(status_frame, text="Status: Initializing...", font=("Arial", 12, "bold"))
@@ -276,79 +266,23 @@ class ACSSGui:
         except Exception as e:
             self._log_message(f"Failed to send command '{text}': {e}")
 
-    def send_sort(self, char):
-        try:
-            char = char.strip().upper()
-            if char not in ("L", "C", "R"):
-                self._log_message(f"Invalid servo command: {char}")
-                return False
-            cmd = f"SORT,{char}"
-            with self.serial_lock:
-                self.serial.write((cmd + "\n").encode())
-                self.serial.flush()
-
-            # wait for ACK,SORT,<char>
-            t0 = time.time()
-            got_ack = False
-            while time.time() - t0 < 1.5:
-                line = self.serial.readline().decode(errors='ignore').strip()
-                if not line:
-                    continue
-                if line == f"ACK,SORT,{char}":
-                    got_ack = True
-                    break
-            if not got_ack:
-                self._log_message(f"No ACK for SORT,{char}")
-            return got_ack
-        except Exception as e:
-            self._log_message(f"Sort failed: {e}")
-            return False
-
-    def send_classification(self, category, idx=None):
-        """
-        Send classification to Arduino.
-        Format: ASSIGN_CLASS,IDX=<idx>,CLASS=<category>
-        Arduino should reply with ACK,ASSIGN_CLASS,IDX=<idx>,CLASS=<category> (or similar).
-        Falls back to ASSIGN_CLASS,CLASS=<category> if idx is None.
-        """
+    def send_simple_classification(self, category):
+        """Send only the single-word classification string to Arduino (no IDX/ASSIGN wrapper)."""
         try:
             category = category.strip().upper()
             if category not in ("OVERCOOKED", "RAW", "STANDARD"):
                 self._log_message(f"Invalid classification: {category}")
                 return False
-
             if not self.serial or not getattr(self.serial, "is_open", False):
                 self._log_message(f"Serial not open — can't send classification: {category}")
                 return False
-
-            if idx:
-                cmd = f"ASSIGN_CLASS,IDX={idx},CLASS={category}"
-            else:
-                cmd = f"ASSIGN_CLASS,CLASS={category}"
-
             with self.serial_lock:
-                self.serial.write((cmd + "\n").encode())
+                self.serial.write((category + "\n").encode())
                 self.serial.flush()
-
-            # wait for ACK,ASSIGN_CLASS... line that contains our category (and idx if provided)
-            t0 = time.time()
-            got_ack = False
-            while time.time() - t0 < 1.5:
-                line = self.serial.readline().decode(errors='ignore').strip()
-                if not line:
-                    continue
-                if line.startswith("ACK,ASSIGN_CLASS") and category in line:
-                    if idx is None or (idx is not None and f"IDX={idx}" in line):
-                        got_ack = True
-                        break
-
-            if not got_ack:
-                self._log_message(f"No ACK for classification {category} (idx={idx})")
-            else:
-                self._log_message(f"Sent classification {category} (idx={idx}) — ACK received.")
-            return got_ack
+            self._log_message(f"[RPI → Arduino] Sent classification: {category}")
+            return True
         except Exception as e:
-            self._log_message(f"Classification send failed: {e}")
+            self._log_message(f"Failed to send simple classification: {e}")
             return False
 
     def serial_reader_thread(self):
@@ -367,10 +301,9 @@ class ACSSGui:
                         self.as7263_timestamp = time.time()
                         self._log_message(f"NIR data received: {vals}")
 
-                    # Item at camera (ACK,AT_CAM,...)
+                    # Item at camera (ACK,AT_CAM,...). RPI will classify and send a plain category back.
                     elif line.startswith("ACK,AT_CAM"):
                         parts = line.split(",")
-                        # look for IDX=... in remaining parts
                         idx_val = None
                         for p in parts:
                             if "IDX=" in p or "index=" in p.lower():
@@ -379,12 +312,13 @@ class ACSSGui:
                                 except Exception:
                                     idx_val = None
                         self.at_cam_idx = idx_val
-                        self._log_message(f"Item at camera (idx={self.at_cam_idx})")
-                        self.at_cam_event.set()
+                        self._log_message(f"Item at camera (idx={self.at_cam_idx}) — classifying and sending simple class")
+                        # trigger classification in a thread to avoid blocking serial reader
+                        threading.Thread(target=self._classify_and_send_simple, args=(self.at_cam_idx,), daemon=True).start()
 
-                    # Flapper arrival
+                    # Flapper arrival: Arduino handled sorting, RPi will update local stats using earliest queued detection
                     elif line == "TRIG,FLAP_OBJECT_DETECTED":
-                        self._log_message("Flapper object detected — assigning sort.")
+                        self._log_message("Flapper object detected — updating local stats from queue (Arduino sorts physically)")
                         self.sort_request_event.set()
 
                     elif line.startswith("ACK,AT_NIR"):
@@ -396,19 +330,13 @@ class ACSSGui:
                     else:
                         self._log_message(f"Serial: {line}")
                 except Exception as e:
-                    if not self.serial_error_logged:
-                        self._log_message(f"Serial reader exception: {e}")
-                        self.serial_error_logged = True
+                    self._log_message(f"Serial reader exception: {e}")
                 time.sleep(0.01)
         except Exception as outer:
             self._log_message(f"Serial reader crashed: {outer}")
 
-    # ----------------- Process control (auto) -----------------
+    # ----------------- Automatic process control -----------------
     def _auto_start_watcher(self):
-        """
-        Wait until serial is open, camera is running, and YOLO loaded (if available),
-        then start processing automatically.
-        """
         start_attempted = False
         while self.running:
             serial_ready = (self.serial is not None and getattr(self.serial, "is_open", False))
@@ -417,14 +345,11 @@ class ACSSGui:
 
             if serial_ready and camera_ready and yolo_ready:
                 if not start_attempted:
-                    # start processing
                     self._log_message("Prerequisites met — starting AUTO processing.")
                     self.status_label.config(text="Status: AUTO running")
                     self.start_process()
                     start_attempted = True
-                # done; just monitor
             else:
-                # show status
                 parts = []
                 parts.append("Serial" if serial_ready else "Serial:missing")
                 parts.append("Camera" if camera_ready else "Camera:missing")
@@ -437,21 +362,20 @@ class ACSSGui:
             time.sleep(0.5)
 
     def start_process(self):
-        """Start the sort processor thread and mark the start time."""
         if self.process_running:
             self._log_message("Process already running.")
             return
         self.stats['start_time'] = time.time()
         self.stats['end_time'] = None
         self.process_running = True
+        # start local stats updater thread
         self.sort_thread = threading.Thread(target=self.sort_processor_loop, daemon=True)
         self.sort_thread.start()
-        self._log_message("Sort processor thread started.")
+        self._log_message("Local stats processor thread started.")
         # Ensure Arduino is in auto mode
         self.send_cmd("MODE,AUTO")
 
     def stop_process(self):
-        """Stop processing and cleanly shutdown sort thread."""
         if not self.process_running:
             return
         self.process_running = False
@@ -463,8 +387,9 @@ class ACSSGui:
         self._log_message("Processing stopped.")
 
     def sort_processor_loop(self):
-        """Main loop: wait for TRIG,FLAP_OBJECT_DETECTED and send SORT,<L|C|R> with earliest classification."""
-        self._log_message("Sort processor loop running.")
+        """When Arduino signals flapper arrival, consume the earliest queued classification and update stats locally.
+        Arduino does the physical SORT, so RPi only updates records."""
+        self._log_message("Local stats processor loop running.")
         while self.process_running and self.running:
             got = self.sort_request_event.wait(timeout=0.2)
             if not self.process_running or not self.running:
@@ -480,22 +405,17 @@ class ACSSGui:
                     item = None
 
             if item is None:
-                sort_char = 'L'
-                category = 'Overcooked'
+                category = 'Overcooked'  # fallback
                 moisture = 4.0
-                self._log_message("No queued classification — sending fallback Overcooked (L)")
+                self._log_message("No queued classification — using fallback Overcooked for stats")
             else:
-                sort_char = item.get('sort_char', 'L')
                 category = item.get('category', 'Overcooked')
                 moisture = item.get('moisture', 4.0)
-                self._log_message(f"Assigning queued classification {category} -> {sort_char}")
+                self._log_message(f"Recording local stats for {category} (moisture {moisture})")
 
-            ok = self.send_sort(sort_char)
-            if ok:
-                threading.Thread(target=self._delayed_stats_update, args=(category, moisture), daemon=True).start()
-            else:
-                self._log_message("Failed to send SORT command — skipping stats update.")
-        self._log_message("Sort processor loop exiting.")
+            # update stats after drop delay
+            threading.Thread(target=self._delayed_stats_update, args=(category, moisture), daemon=True).start()
+        self._log_message("Local stats processor loop exiting.")
 
     def _delayed_stats_update(self, category, moisture):
         try:
@@ -558,38 +478,32 @@ class ACSSGui:
 
     def camera_loop(self):
         last_frame_time = time.time()
-        display_skip = 0
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()
-                # normalize frame
                 if CV2_AVAILABLE:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
                 else:
                     frame = frame[:, :, :3]
 
-                current_time = time.time()
-                if current_time - last_frame_time > 0.2:
-                    if not self.frame_drop_logged:
-                        self._log_message(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
-                        self.frame_drop_logged = True
-                    last_frame_time = current_time
+                # store latest frame for on-demand classification (used when Arduino sends ACK,AT_CAM)
+                with self.frame_lock:
+                    self.latest_frame = frame.copy()
 
+                current_time = time.time()
                 results = None
-                # Only attempt detection if process is running and there's a camera-at-item event
-                if self.yolo and self.process_running and self.at_cam_event.is_set():
+
+                # Run YOLO in background to queue detections for local stats (no direct serial sends here)
+                if self.yolo and self.process_running:
                     try:
                         results = self.yolo.predict(source=frame, conf=0.3, max_det=3, verbose=False)
                     except Exception as ex:
-                        if self.yolo_log_suppressed:
-                            self._log_message(f"YOLO predict error: {ex}")
-                            self.yolo_log_suppressed = False
+                        self._log_message(f"YOLO predict error: {ex}")
                         results = None
 
                 has_detection = results and results[0].boxes and len(results[0].boxes) > 0
-                as7263_valid = self.as7263_data is not None and (current_time - self.as7263_timestamp) < 0.5
 
-                if has_detection and self.process_running and current_time > self.detection_cooldown and self.at_cam_event.is_set():
+                if has_detection and self.process_running and current_time > getattr(self, 'detection_cooldown', 0):
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                     conf_tensor = results[0].boxes.conf.cpu().numpy()
@@ -600,7 +514,7 @@ class ACSSGui:
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
                         if conf > 0.3 and y_center < FALLBACK_ZONE_Y:
-                            # compute moisture approximation (kept your heuristics)
+                            # moisture heuristics (kept simple)
                             if cls == 0:
                                 moisture = 4.0 + (conf - 0.3) * (6.0 - 4.0) / 0.7
                             elif cls == 1:
@@ -614,7 +528,6 @@ class ACSSGui:
                             candidates.append((cls, conf, y_center, moisture))
 
                     if candidates:
-                        # choose the candidate closest to top (smallest y_center)
                         candidates.sort(key=lambda x: x[2])
                         leading = candidates[0]
                         cls, conf, y_center, moisture = leading
@@ -628,23 +541,10 @@ class ACSSGui:
                         }
                         with self.sort_queue_lock:
                             self.sort_queue.append(detection)
-                        self._log_message(f"Queued {category} for idx={self.at_cam_idx} (conf {conf:.2f})")
-                        # send classification to Arduino including idx (if available)
-                        try:
-                            self.send_classification(category, idx=self.at_cam_idx)
-                        except Exception as e:
-                            self._log_message(f"Failed to send classification after queue: {e}")
-
+                        self._log_message(f"Queued {category} (conf {conf:.2f}) for local stats")
                         self.detection_cooldown = current_time + DETECTION_COOLDOWN
-                        # clear the at_cam_event so we don't classify the same item repeatedly
-                        self.at_cam_event.clear()
 
-                # request NIR if not present
-                if self.process_running and self.at_cam_event.is_set() and current_time > self.as_request_cooldown and not as7263_valid:
-                    threading.Thread(target=self._request_nir_reading, daemon=True).start()
-                    self.as_request_cooldown = current_time + 1
-
-                # prepare frame for display
+                # prepare display frame
                 display_frame = frame
                 if results and results[0].boxes:
                     try:
@@ -659,7 +559,49 @@ class ACSSGui:
                 time.sleep(0.01)
             except Exception as e:
                 self._log_message(f"Camera loop error: {e}")
-                time.sleep(0.2)
+
+    def _classify_and_send_simple(self, idx=None):
+        """Called when Arduino signals ACK,AT_CAM. Attempt to classify the latest frame (YOLO preferred),
+        else fallback to a dummy random classification. Then send only the category string to Arduino."""
+        try:
+            frame = None
+            with self.frame_lock:
+                if self.latest_frame is not None:
+                    frame = self.latest_frame.copy()
+
+            # If YOLO is available, run a quick single-frame inference
+            category = None
+            if frame is not None and self.yolo is not None:
+                try:
+                    results = self.yolo.predict(source=frame, conf=0.25, max_det=1, verbose=False)
+                    if results and results[0].boxes and len(results[0].boxes) > 0:
+                        cls = int(results[0].boxes.cls[0].cpu().numpy())
+                        category = self.category_map.get(cls, 'Overcooked')
+                except Exception as ex:
+                    self._log_message(f"YOLO quick classify error: {ex}")
+
+            # fallback to simple dummy classifier if needed
+            if category is None:
+                import random
+                category = random.choice(["RAW", "STANDARD", "OVERCOOKED"]) if random else "OVERCOOKED"
+
+            # ensure uppercase words match allowed set
+            mapping = {"STANDARD":"STANDARD", "RAW":"RAW", "OVERCOOKED":"OVERCOOKED",
+                       "Standard":"STANDARD", "Raw":"RAW", "Overcooked":"OVERCOOKED"}
+            cat_send = mapping.get(category, category).upper()
+
+            # send the simple classification string
+            self.send_simple_classification(cat_send)
+
+            # also queue locally for stats so we can match when TRIG,FLAP_OBJECT_DETECTED arrives
+            # put a conservative moisture estimate (could be refined by NIR)
+            moisture = 6.0 if cat_send == 'STANDARD' else (7.5 if cat_send == 'RAW' else 4.0)
+            detection = {'detection_time': time.time(), 'sort_char': 'L', 'category': 'Overcooked' if cat_send=='OVERCOOKED' else ('Raw' if cat_send=='RAW' else 'Standard'), 'moisture': moisture}
+            with self.sort_queue_lock:
+                self.sort_queue.append(detection)
+
+        except Exception as e:
+            self._log_message(f"classify_and_send_simple error: {e}")
 
     def update_canvas_with_frame(self, bgr_frame):
         try:
@@ -672,12 +614,10 @@ class ACSSGui:
             if PIL_AVAILABLE:
                 img = Image.fromarray(rgb)
                 imgtk = ImageTk.PhotoImage(img)
-                # Avoid leaving multiple images on canvas: clear and draw
                 self.cam_canvas.delete("all")
                 self.cam_canvas.imgtk = imgtk
                 self.cam_canvas.create_image(0, 0, anchor='nw', image=imgtk)
             else:
-                # fallback to cv2 window (not ideal for fullscreen)
                 cv2.imshow("Camera Preview", bgr_frame)
                 cv2.waitKey(1)
         except Exception as e:
@@ -714,9 +654,6 @@ class ACSSGui:
         self.update_stats()
 
     def _log_message(self, msg):
-        # minimal duplicate suppression
-        if ("Frame drop" in msg and self.frame_drop_logged) or ("Serial reader exception" in msg and self.serial_error_logged):
-            return
         ts = time.strftime("%H:%M:%S")
         full_msg = f"[{ts}] {msg}"
         try:
@@ -726,10 +663,6 @@ class ACSSGui:
             self.log.config(state='disabled')
         except Exception:
             print(full_msg)
-        if "Frame drop" in msg:
-            self.frame_drop_logged = True
-        if "Serial reader exception" in msg:
-            self.serial_error_logged = True
 
     def on_close(self):
         self.running = False
@@ -746,6 +679,7 @@ class ACSSGui:
             self.root.destroy()
         except Exception:
             pass
+
 
 if __name__ == "__main__":
     root = tk.Tk()

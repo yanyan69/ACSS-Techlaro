@@ -67,6 +67,7 @@ SERIAL_BAUD = 115200
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Fixed typo (.py → .pt); replace with your custom path if needed
 CAM_PREVIEW_SIZE = (480, 360)
 TRACKER_PATH = "bytetrack.yaml"  # Optional: Path to tracker config (download from Ultralytics GitHub if needed)
+CLASSIFICATION_TIMEOUT_S = 2.0  # Time to poll for detection after AT_CAM
 # ----------------------------------
 
 class ACSSGui:
@@ -253,22 +254,25 @@ class ACSSGui:
     # ---------- Classification ----------
     def classify_and_send(self):
         try:
-            with self.results_lock:
-                if self.latest_results and self.latest_results.boxes:
-                    boxes = self.latest_results.boxes
-                    confs = boxes.conf.cpu().numpy()
-                    if len(confs) > 0:
-                        max_idx = np.argmax(confs)
-                        cls = int(boxes.cls[max_idx])
-                        conf = confs[max_idx]
-                        if conf > 0.5:
-                            class_str = {0: "OVERCOOKED", 1: "RAW", 2: "STANDARD"}.get(cls, "OVERCOOKED")
-                            self.send_cmd(class_str)
-                            self.logmsg(f"Classified and sent: {class_str} (conf {conf:.2f})")
-                            console.comment(f"Classified: {class_str}", rephrase=False)
-                            return
-            self.logmsg("No reliable detection, skipping send (Arduino failsafe to OVERCOOKED)")
-            console.comment("No detection, using failsafe", rephrase=False)
+            start_time = time.time()
+            while time.time() - start_time < CLASSIFICATION_TIMEOUT_S:
+                with self.results_lock:
+                    if self.latest_results and self.latest_results.boxes:
+                        boxes = self.latest_results.boxes
+                        confs = boxes.conf.cpu().numpy()
+                        if len(confs) > 0:
+                            max_idx = np.argmax(confs)
+                            cls = int(boxes.cls[max_idx])
+                            conf = confs[max_idx]
+                            if conf > 0.5:
+                                class_str = {0: "OVERCOOKED", 1: "RAW", 2: "STANDARD"}.get(cls, "OVERCOOKED")
+                                self.send_cmd(class_str)
+                                self.logmsg(f"Classified and sent: {class_str} (conf {conf:.2f})")
+                                console.comment(f"Classified: {class_str}", rephrase=False)
+                                return
+                time.sleep(0.1)  # Poll every 100ms
+            self.logmsg("No reliable detection within timeout, skipping send (Arduino failsafe to OVERCOOKED)")
+            console.comment("No detection within timeout, using failsafe", rephrase=False)
         except Exception as e:
             self.logmsg(f"Classification error: {e}")
             console.comment("Classification error", rephrase=True)

@@ -449,7 +449,10 @@ class ACSSGui:
                 # Only attempt detection if process is running and there's a camera-at-item event
                 if self.yolo and self.process_running and self.at_cam_event.is_set():
                     try:
+                        t0 = time.time()
                         results = self.yolo.predict(source=frame, conf=0.3, max_det=3, verbose=False)
+                        t1 = time.time()
+                        self._log_message(f"YOLO inference time: {t1 - t0:.3f}s")
                     except Exception as ex:
                         if self.yolo_log_suppressed:
                             self._log_message(f"YOLO predict error: {ex}")

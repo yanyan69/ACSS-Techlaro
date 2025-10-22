@@ -50,6 +50,7 @@ SERIAL_BAUD = 115200
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 SORT_ZONE_Y = 240
 FALLBACK_ZONE_Y = 100
+TRACKER_PATH = "bytetrack.yaml"
 # ----------------------------------------------------
 
 class ACSSGui:
@@ -95,6 +96,8 @@ class ACSSGui:
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
         self.category_map = {0: 'Overcooked', 1: 'Raw', 2: 'Standard'}
         self.stats = {'Raw': 0, 'Standard': 0, 'Overcooked': 0, 'total': 0, 'start_time': None, 'end_time': None}
+        self.sorted_tracks = set()
+        self.last_cleanup = time.time()
 
         # Arduino camera index event (ACK,AT_CAM)
         self.at_cam_event = threading.Event()
@@ -182,7 +185,7 @@ class ACSSGui:
         self.total_pieces_label = tk.Label(stats_frame, text="0")
         self.total_pieces_label.grid(row=row_offset, column=1, padx=8, pady=4)
 
-        tk.Label(stats_frame, text="Total Avg Avg Moisture:", font=("Arial", 10, "bold")).grid(row=row_offset+1, column=0, padx=8, pady=4, sticky="w")
+        tk.Label(stats_frame, text="Total Avg Moisture:", font=("Arial", 10, "bold")).grid(row=row_offset+1, column=0, padx=8, pady=4, sticky="w")
         self.total_moisture_label = tk.Label(stats_frame, text="0.0%")
         self.total_moisture_label.grid(row=row_offset+1, column=1, padx=8, pady=4)
 
@@ -428,7 +431,8 @@ class ACSSGui:
 
     def camera_loop(self):
         last_frame_time = time.time()
-        display_skip = 0
+        frame_counter = 0
+        fps_time = time.time()
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()
@@ -449,58 +453,76 @@ class ACSSGui:
                 # Only attempt detection if process is running and there's a camera-at-item event
                 if self.yolo and self.process_running and self.at_cam_event.is_set():
                     try:
-                        t0 = time.time()
-                        results = self.yolo.predict(source=frame, conf=0.3, max_det=3, verbose=False)
-                        t1 = time.time()
-                        self._log_message(f"YOLO inference time: {t1 - t0:.3f}s")
+                        results = self.yolo.track(source=frame, persist=True, tracker=TRACKER_PATH, conf=0.3, max_det=3, verbose=False)
                     except Exception as ex:
                         if self.yolo_log_suppressed:
-                            self._log_message(f"YOLO predict error: {ex}")
+                            self._log_message(f"YOLO track error: {ex}")
                             self.yolo_log_suppressed = False
                         results = None
 
                 has_detection = results and results[0].boxes and len(results[0].boxes) > 0
 
                 if has_detection and self.process_running and self.at_cam_event.is_set():
+                    track_ids = results[0].boxes.id.cpu().numpy() if results[0].boxes.id is not None else []
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                     conf_tensor = results[0].boxes.conf.cpu().numpy()
                     candidates = []
                     for i in range(len(cls_tensor)):
-                        y_center = (boxes[i, 1] + boxes[i, 3]) / 2
-                        cls = cls_tensor[i]
-                        conf = conf_tensor[i]
-                        if conf > 0.3 and y_center < FALLBACK_ZONE_Y:
-                            # compute moisture approximation (kept your heuristics)
-                            if cls == 0:
-                                moisture = 4.0 + (conf - 0.3) * (6.0 - 4.0) / 0.7
-                            elif cls == 1:
-                                moisture = 7.1 + (conf - 0.3) * (14.0 - 7.1) / 0.7
-                            elif cls == 2:
-                                moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
-                            else:
-                                cls = 0
-                                moisture = 4.0
-                            moisture = round(moisture, 1)
-                            candidates.append((cls, conf, y_center, moisture))
+                        track_id = int(track_ids[i]) if len(track_ids) > i else -1
+                        if track_id not in self.sorted_tracks and track_id != -1:
+                            y_center = (boxes[i, 1] + boxes[i, 3]) / 2
+                            cls = cls_tensor[i]
+                            conf = conf_tensor[i]
+                            if conf > 0.3 and y_center < FALLBACK_ZONE_Y:
+                                # compute moisture approximation (kept your heuristics)
+                                if cls == 0:
+                                    moisture = 4.0 + (conf - 0.3) * (6.0 - 4.0) / 0.7
+                                elif cls == 1:
+                                    moisture = 7.1 + (conf - 0.3) * (14.0 - 7.1) / 0.7
+                                elif cls == 2:
+                                    moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
+                                else:
+                                    cls = 0
+                                    moisture = 4.0
+                                moisture = round(moisture, 1)
+                                candidates.append((track_id, cls, conf, y_center, moisture))
                     if candidates:
                         # choose the candidate closest to top (smallest y_center)
-                        candidates.sort(key=lambda x: x[2])
+                        candidates.sort(key=lambda x: x[3])
                         leading = candidates[0]
-                        cls, conf, y_center, moisture = leading
+                        track_id, cls, conf, y_center, moisture = leading
                         category = self.category_map.get(cls, 'Overcooked')
                         # Log classification before sending to ensure it appears before NIR logs
-                        self._log_message(f"Classified {category} (moisture {moisture:.1f}%) conf {conf:.2f} idx={self.at_cam_idx}")
+                        self._log_message(f"Classified {category} (moisture {moisture:.1f}%) conf {conf:.2f} idx={self.at_cam_idx} track_id={track_id}")
                         # Send classification and update stats if successful
                         ok = self.send_classification(category)
                         if ok:
                             self._update_stats_after_drop(category, moisture)
+                            self.sorted_tracks.add(track_id)
                         # clear the at_cam_event so we don't classify the same item repeatedly
                         self.at_cam_event.clear()
                     else:
-                        # No candidates in zone, clear event to avoid stuck
+                        category = 'Overcooked'
+                        moisture = 4.0
+                        self._log_message(f"No suitable candidate - Classified {category} (moisture {moisture:.1f}%) idx={self.at_cam_idx}")
+                        ok = self.send_classification(category)
+                        if ok:
+                            self._update_stats_after_drop(category, moisture)
                         self.at_cam_event.clear()
-                        self._log_message("No suitable candidate in zone for idx={self.at_cam_idx}")
+                    # Periodic cleanup
+                    if current_time - self.last_cleanup > 10.0:
+                        if len(results[0].boxes) == 0:
+                            self.sorted_tracks.clear()
+                        self.last_cleanup = current_time
+
+                # FPS overlay
+                frame_counter += 1
+                if frame_counter >= 10:
+                    fps = 10 / (time.time() - fps_time)
+                    cv2.putText(frame, f"FPS: {fps:.1f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    fps_time = time.time()
+                    frame_counter = 0
 
                 # prepare frame for display
                 display_frame = frame

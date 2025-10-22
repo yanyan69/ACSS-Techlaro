@@ -50,7 +50,6 @@ SERIAL_BAUD = 115200
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 SORT_ZONE_Y = 240
 FALLBACK_ZONE_Y = 100
-SORT_DELAY = 1.3
 # ----------------------------------------------------
 
 class ACSSGui:
@@ -487,11 +486,12 @@ class ACSSGui:
                         leading = candidates[0]
                         cls, conf, y_center, moisture = leading
                         category = self.category_map.get(cls, 'Overcooked')
+                        # Log classification before sending to ensure it appears before NIR logs
+                        self._log_message(f"Classified {category} (moisture {moisture:.1f}%) conf {conf:.2f} idx={self.at_cam_idx}")
                         # Send classification and update stats if successful
                         ok = self.send_classification(category)
                         if ok:
                             self._update_stats_after_drop(category, moisture)
-                        self._log_message(f"Classified {category} (moisture {moisture:.1f}%) conf {conf:.2f} idx={self.at_cam_idx}")
                         # clear the at_cam_event so we don't classify the same item repeatedly
                         self.at_cam_event.clear()
 

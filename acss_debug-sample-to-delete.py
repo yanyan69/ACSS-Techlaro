@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 ACSS component test GUI for Raspberry Pi 5.
-- Uses Arduino as IO: expect Arduino serial protocol:
-- Arduino -> Pi: "IR\n" when IR triggered, "AS:val1,val2,...\n" when responding to REQ_AS, "ACK\n" for actions ack
-- Pi -> Arduino: "SORT,L\n" or "SORT,C\n" or "SORT,R\n" ; "REQ_AS\n" ; "MOTOR,ON\n" / "MOTOR,OFF\n"
+- Uses Arduino as IO: expect Arduino serial protocol.
+- Arduino -> Pi: Various ACK, TRIG, AS: messages.
+- Pi -> Arduino: Classification strings (OVERCOOKED, RAW, STANDARD), other commands.
 Notes:
 - Automatically opens serial port and starts camera if available.
 - All actions wrapped in try/except with debug printouts.
+- Triggers classification on "ACK,AT_CAM" from serial.
 """
 
 import sys, threading, time
@@ -62,7 +63,7 @@ except Exception:
 
 # ---------- USER SETTINGS ----------
 SERIAL_PORT = "/dev/ttyUSB0"       # /dev/ttyUSB0
-SERIAL_BAUD = 9600
+SERIAL_BAUD = 115200
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Fixed typo (.py → .pt); replace with your custom path if needed
 CAM_PREVIEW_SIZE = (480, 360)
 TRACKER_PATH = "bytetrack.yaml"  # Optional: Path to tracker config (download from Ultralytics GitHub if needed)
@@ -92,16 +93,14 @@ class ACSSGui:
 
         tests_frame = tk.LabelFrame(frm, text="Tests")
         tests_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-        tk.Button(tests_frame, text="Servo: LEFT", command=lambda: self.send_sort('L')).grid(row=0, column=0, padx=2, pady=2)
-        tk.Button(tests_frame, text="Servo: CENTER", command=lambda: self.send_sort('C')).grid(row=0, column=1, padx=2, pady=2)
-        tk.Button(tests_frame, text="Servo: RIGHT", command=lambda: self.send_sort('R')).grid(row=0, column=2, padx=2, pady=2)
+        tk.Button(tests_frame, text="Servo: LEFT", command=lambda: self.send_cmd("SORT,L")).grid(row=0, column=0, padx=2, pady=2)
+        tk.Button(tests_frame, text="Servo: CENTER", command=lambda: self.send_cmd("SORT,C")).grid(row=0, column=1, padx=2, pady=2)
+        tk.Button(tests_frame, text="Servo: RIGHT", command=lambda: self.send_cmd("SORT,R")).grid(row=0, column=2, padx=2, pady=2)
         tk.Button(tests_frame, text="Motor ON", command=lambda: self.send_cmd("MOTOR,ON")).grid(row=1, column=0, padx=2, pady=2)
         tk.Button(tests_frame, text="Motor OFF", command=lambda: self.send_cmd("MOTOR,OFF")).grid(row=1, column=1, padx=2, pady=2)
         tk.Button(tests_frame, text="Request AS7263", command=self.request_as).grid(row=2, column=0, padx=2, pady=2)
-        tk.Button(tests_frame, text="Start IR Monitor", command=self.start_ir_monitor).grid(row=2, column=1, padx=2, pady=2)
-        tk.Button(tests_frame, text="Stop IR Monitor", command=self.stop_ir_monitor).grid(row=2, column=2, padx=2, pady=2)
-        tk.Button(tests_frame, text="Start Process", command=self.start_process).grid(row=3, column=0, padx=2, pady=2)
-        tk.Button(tests_frame, text="Stop Process", command=self.stop_process).grid(row=3, column=1, padx=2, pady=2)
+        tk.Button(tests_frame, text="Auto Mode", command=lambda: self.send_cmd("MODE,AUTO")).grid(row=2, column=1, padx=2, pady=2)
+        tk.Button(tests_frame, text="Manual Mode", command=lambda: self.send_cmd("MODE,MANUAL")).grid(row=2, column=2, padx=2, pady=2)
 
         cam_frame = tk.LabelFrame(frm, text="Camera / YOLO")
         cam_frame.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=4, pady=4)
@@ -116,18 +115,12 @@ class ACSSGui:
         self.log = scrolledtext.ScrolledText(log_frame, height=6, width=80, state='disabled', wrap='none')
         self.log.pack(fill='both', expand=True)
 
-        self.ir_monitoring = False
-        self.ir_thread = None
         self.camera_thread = None
         self.picam2 = None
         self.yolo = None
         self.frame_lock = threading.Lock()
-        self.latest_frame = None
-        self.process_running = False
-        self.sort_cooldown = 0
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
-        self.sorted_tracks = set()  # Track sorted IDs to avoid re-sorts
-        self.last_cleanup = time.time()  # For periodic cleanup
+        self.results_lock = threading.Lock()
+        self.latest_results = None
 
         # ---------- YOLO Model Load ----------
         if ULTRALYTICS_AVAILABLE:
@@ -233,61 +226,6 @@ class ACSSGui:
             self.logmsg(f"[ERR] Failed to send command '{text}': {e}")
             console.comment(f"Failed to send command {text}", rephrase=True)
 
-    def send_sort(self, char):
-        """Send servo sort command (L, C, R)."""
-        try:
-            char = char.strip().upper()
-            if char not in ("L", "C", "R"):
-                self.logmsg(f"[WARN] Invalid servo command: {char}")
-                console.comment(f"Invalid servo command: {char}", rephrase=True)
-                return
-            cmd = f"SORT,{char}"
-            self.logmsg(f"[SERVO] Sending: {cmd}")
-            console.comment(f"Sending servo command {char}", rephrase=False)
-            self.send_cmd(cmd)
-        except Exception as e:
-            self.logmsg(f"[ERR] Servo send_sort failed: {e}")
-            console.comment("Failed to send servo command", rephrase=True)
-
-    # ---------- Process Control ----------
-    def start_process(self):
-        try:
-            if not (self.serial and self.serial.is_open):
-                self.logmsg("Open serial first.")
-                console.comment("Cannot start process because serial not open", rephrase=True)
-                return
-            if not self.yolo:
-                self.logmsg("YOLO model not loaded.")
-                console.comment("Cannot start process because YOLO not loaded", rephrase=True)
-                return
-            if self.process_running:
-                self.logmsg("Process already running.")
-                console.comment("Process already running", rephrase=False)
-                return
-            self.send_cmd("MOTOR,ON")
-            self.process_running = True
-            self.sort_cooldown = time.time()
-            self.sorted_tracks.clear()  # Reset sorted tracks on process start
-            self.logmsg("Process started: Motor ON, detection active.")
-            console.comment("Process started: Motor ON, detection active", rephrase=False)
-        except Exception as e:
-            self.logmsg(f"Start process error: {e}")
-            console.comment("Error starting process", rephrase=True)
-
-    def stop_process(self):
-        try:
-            if not self.process_running:
-                self.logmsg("Process not running.")
-                console.comment("Process not running", rephrase=False)
-                return
-            self.send_cmd("MOTOR,OFF")
-            self.process_running = False
-            self.logmsg("Process stopped: Motor OFF, detection inactive.")
-            console.comment("Process stopped: Motor OFF, detection inactive", rephrase=False)
-        except Exception as e:
-            self.logmsg(f"Stop process error: {e}")
-            console.comment("Error stopping process", rephrase=True)
-
     # ---------- Serial Reader ----------
     def serial_reader_thread(self):
         if not self.gui_ready:
@@ -295,35 +233,15 @@ class ACSSGui:
         self.logmsg("Serial reader started.")
         console.comment("Serial reader started", rephrase=False)
         try:
-            ir_state = False
-            last_ir_report_time = time.time()
             while self.serial and self.serial.is_open and self.running:
                 try:
                     line = self.serial.readline().decode(errors='ignore').strip()
                     if not line:
-                        if self.ir_monitoring and ir_state and (time.time() - last_ir_report_time > 1.0):
-                            ir_state = False
-                            self.logmsg("IR: No object detected (timeout)")
-                            console.comment("IR no object detected", rephrase=False)
                         continue
-
-                    # Handle IR silently unless monitoring and state change
-                    if line == "IR":
-                        if self.ir_monitoring:
-                            last_ir_report_time = time.time()
-                            if not ir_state:
-                                ir_state = True
-                                self.logmsg("IR: Object detected")
-                                console.comment("IR object detected", rephrase=False)
-                        # else: silent, no noise
-                    elif line.startswith("AS:"):
-                        vals = line[3:].split(",")
-                        self.logmsg(f"AS values: {vals}")
-                        console.comment(f"Received AS values: {vals}", rephrase=False)
-                    elif line == "ACK":
-                        self.logmsg("ACK from Arduino")
-                        console.comment("Received ACK from Arduino", rephrase=False)
-                    # No else: silent for unknowns, keeps it clean
+                    self.logmsg("[RX] " + line)
+                    if line.startswith("ACK,AT_CAM"):
+                        self.logmsg("Received AT_CAM, classifying...")
+                        self.classify_and_send()
                 except Exception as e:
                     self.logmsg(f"Serial reader exception: {e}")
                     console.comment("Serial reader exception", rephrase=True)
@@ -331,6 +249,29 @@ class ACSSGui:
         except Exception as outer:
             self.logmsg(f"Serial reader crashed: {outer}")
             console.comment("Serial reader crashed", rephrase=True)
+
+    # ---------- Classification ----------
+    def classify_and_send(self):
+        try:
+            with self.results_lock:
+                if self.latest_results and self.latest_results.boxes:
+                    boxes = self.latest_results.boxes
+                    confs = boxes.conf.cpu().numpy()
+                    if len(confs) > 0:
+                        max_idx = np.argmax(confs)
+                        cls = int(boxes.cls[max_idx])
+                        conf = confs[max_idx]
+                        if conf > 0.5:
+                            class_str = {0: "OVERCOOKED", 1: "RAW", 2: "STANDARD"}.get(cls, "OVERCOOKED")
+                            self.send_cmd(class_str)
+                            self.logmsg(f"Classified and sent: {class_str} (conf {conf:.2f})")
+                            console.comment(f"Classified: {class_str}", rephrase=False)
+                            return
+            self.logmsg("No reliable detection, skipping send (Arduino failsafe to OVERCOOKED)")
+            console.comment("No detection, using failsafe", rephrase=False)
+        except Exception as e:
+            self.logmsg(f"Classification error: {e}")
+            console.comment("Classification error", rephrase=True)
 
     # ---------- AS Request ----------
     def request_as(self):
@@ -362,33 +303,6 @@ class ACSSGui:
         except Exception as e:
             self.logmsg(f"REQ_AS failed: {e}")
             console.comment("Failed to request AS", rephrase=True)
-
-    # ---------- IR Monitor ----------
-    def start_ir_monitor(self):
-        try:
-            if not (self.serial and self.serial.is_open):
-                self.logmsg("Open serial first.")
-                console.comment("Cannot start IR monitor because serial not open", rephrase=True)
-                return
-            if self.ir_monitoring:
-                self.logmsg("IR monitor already running.")
-                console.comment("IR monitor already running", rephrase=False)
-                return
-            self.ir_monitoring = True
-            self.logmsg("IR monitor started.")
-            console.comment("IR monitor started", rephrase=False)
-        except Exception as e:
-            self.logmsg(f"IR monitor start error: {e}")
-            console.comment("Error starting IR monitor", rephrase=True)
-
-    def stop_ir_monitor(self):
-        try:
-            self.ir_monitoring = False
-            self.logmsg("IR monitor stopped.")
-            console.comment("IR monitor stopped", rephrase=False)
-        except Exception as e:
-            self.logmsg(f"IR monitor stop error: {e}")
-            console.comment("Error stopping IR monitor", rephrase=True)
 
     # ---------- Camera ----------
     def start_camera(self):
@@ -437,7 +351,6 @@ class ACSSGui:
     def camera_loop(self):
         frame_counter = 0
         fps_time = time.time()
-        debug_tracking = True  # Set False in prod to reduce logs
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()  # capture raw frame
@@ -455,52 +368,8 @@ class ACSSGui:
                         verbose=False
                     )
                     frame = results[0].plot()  # Plots boxes + track IDs!
-
-                    # --- Integrated Process Detection with Tracking ---
-                    current_time = time.time()
-                    if self.process_running and results[0].boxes is not None and len(results[0].boxes) > 0 and current_time > self.sort_cooldown:
-                        # Get track IDs
-                        track_ids = results[0].boxes.id.cpu().numpy() if results[0].boxes.id is not None else np.array([])
-                        
-                        # Get bounding boxes for y-centers
-                        boxes = results[0].boxes.xyxy.cpu().numpy()  # [x1, y1, x2, y2]
-                        cls_tensor = results[0].boxes.cls.cpu().numpy()
-                        conf_tensor = results[0].boxes.conf.cpu().numpy()
-                        
-                        # Find candidate tracks: unsorted, high conf
-                        candidates = []
-                        for i in range(len(cls_tensor)):
-                            track_id = int(track_ids[i]) if len(track_ids) > i else -1
-                            if track_id not in self.sorted_tracks and track_id != -1:
-                                y_center = (boxes[i, 1] + boxes[i, 3]) / 2  # Avg y (bottom-to-top: min y = leading)
-                                cls = int(cls_tensor[i])
-                                conf = conf_tensor[i]
-                                if conf > 0.25:
-                                    candidates.append((track_id, cls, conf, y_center, i))
-                        
-                        if candidates:
-                            # Sort candidates by y-center (ascending: lowest y first = leading/highest on screen)
-                            candidates.sort(key=lambda x: x[3])  # Sort by y_center
-                            leading_track = candidates[0]  # First = leading
-                            track_id, cls, conf, y_center, orig_i = leading_track
-                            
-                            sort_char = self.class_to_sort.get(cls, 'C')
-                            self.send_sort(sort_char)
-                            self.logmsg(f"Tracked ID {track_id} (y-center {y_center:.1f}): class {cls} conf {conf:.2f}, sorting {sort_char}")
-                            if debug_tracking:
-                                console.comment(f"Leading track {track_id} at y={y_center:.1f} (class {cls}, conf {conf:.2f}) -> {sort_char}", rephrase=False)
-                            self.sorted_tracks.add(track_id)  # Mark as sorted
-                            self.sort_cooldown = current_time + 2.0  # Global debounce
-                        elif debug_tracking:
-                            console.comment(f"No new unsorted tracks this frame (total detections: {len(cls_tensor)})", rephrase=False)
-
-                        # Periodic cleanup of old tracks
-                        if current_time - self.last_cleanup > 10.0:  # Every 10s
-                            if len(results[0].boxes) == 0:
-                                self.sorted_tracks.clear()  # Reset if empty
-                                if debug_tracking:
-                                    console.comment("Cleared stale tracks (empty frame)", rephrase=False)
-                            self.last_cleanup = current_time
+                    with self.results_lock:
+                        self.latest_results = results[0]
 
                 # --- FPS overlay ---
                 frame_counter += 1
@@ -538,7 +407,6 @@ class ACSSGui:
     def on_close(self):
         try:
             self.running = False
-            self.process_running = False
             self.camera_running = False
             if self.picam2:
                 self.picam2.stop()

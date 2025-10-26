@@ -4,16 +4,17 @@ Automated Copra Segregation System (ACSS) GUI
 - Provides a user interface for controlling and monitoring the copra segregation process.
 - Integrates with Arduino via serial for automated detection and sorting using ultrasonic sensors and servos.
 - Uses YOLO for copra classification (Raw, Standard, Overcooked) based on camera frames triggered by Arduino.
-- Displays real-time camera preview, logs (system events, classifications, moisture estimates), and statistics (pieces processed, average moisture).
+- Displays real-time camera preview, logs (classification results, system events), and statistics.
 - About tab with project description, objectives, and team profiles.
 - Exit tab for safe shutdown.
+- Arduino logs (ACK, TRIG, ERR, DBG) are shown in terminal only; GUI log shows classification and system events.
 
 Expected Functionalities:
-- Home Tab: Start/Stop process (enables/disables Arduino auto mode), camera preview, log display.
-- Statistics Tab: Tracks processed copra by category, average moisture (estimated from YOLO confidence), total counts, and timestamps.
-- About Tab: Project info, objectives, team profiles with images; scrollable if content overflows; floating min/max button to toggle full-screen.
+- Home Tab: Start/Stop process, camera preview, log display with classification results and system events.
+- Statistics Tab: Tracks processed copra, average moisture, total counts, timestamps.
+- About Tab: Project info, objectives, team profiles with images; scrollable; min/max button.
 - Exit Tab: Graceful exit with confirmation, stopping processes and closing serial/camera.
-- Serial Interaction: Sends AUTO_ENABLE/DISABLE and classifications; receives ACK,AT_CAM to trigger YOLO.
+- Serial Interaction: Sends AUTO_ENABLE/DISABLE, RESET, classifications; receives ACK,AT_CAM, TRIG, ERR, DBG.
 - Moisture Estimation: Based on YOLO confidence (Raw: 7.1-60%, Standard: 6-7%, Overcooked: 4-5.9%).
 
 Setup Instructions:
@@ -61,11 +62,13 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution as requested
+CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
+CLASSIFICATION_TIMEOUT_S = 2.5  # Within Arduino's CLASS_WAIT_MS = 3000ms
+MAX_FRAME_AGE_S = 0.5  # Max age of frame for classification
 
 # ---------------------------------------------------
 
@@ -73,7 +76,6 @@ class ACSSGui:
     def __init__(self, root):
         self.root = root
         root.title("Automated Copra Segregation System")
-        # Set full screen for 1024x600
         self.root.attributes('-fullscreen', True)
 
         # Notebook (Tabs)
@@ -108,11 +110,12 @@ class ACSSGui:
         self.yolo = None
         self.frame_lock = threading.Lock()
         self.latest_frame = None
+        self.latest_frame_time = 0
         self.serial_reader_thread_obj = None
-        self.serial_error_logged = False  # Prevent serial error spam
-        self.frame_drop_logged = False  # Prevent frame drop spam
+        self.serial_error_logged = False
+        self.frame_drop_logged = False
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
+        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Note: Arduino maps 'C' to no servo action
         self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
         self.stats = {
             'Raw': 0,
@@ -122,7 +125,7 @@ class ACSSGui:
             'start_time': None,
             'end_time': None
         }
-        self.copra_counter = 0  # Counter for copra numbering
+        self.copra_counter = 0
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -132,6 +135,7 @@ class ACSSGui:
                 print(f"YOLO model loaded: {YOLO_MODEL_PATH}")
             except Exception as ex:
                 self._log_message(f"YOLO load failed: {ex}", console_only=True)
+                self.process_btn.config(state='disabled')
 
         # Auto-start serial and camera
         self.open_serial()
@@ -151,8 +155,8 @@ class ACSSGui:
         # Min/Max button (initially hidden)
         self.min_max_btn = tk.Button(root, text="Minimize", command=self._toggle_fullscreen,
                                      font=("Arial", 10), bg="gray", fg="white")
-        self.min_max_btn.place(relx=0.95, rely=0.95, anchor='se')  # Bottom-right
-        self.min_max_btn.place_forget()  # Hide initially
+        self.min_max_btn.place(relx=0.95, rely=0.95, anchor='se')
+        self.min_max_btn.place_forget()
 
     def _on_tab_changed(self, event):
         notebook = event.widget
@@ -165,11 +169,8 @@ class ACSSGui:
     def _toggle_fullscreen(self):
         is_fullscreen = self.root.attributes('-fullscreen')
         self.root.attributes('-fullscreen', not is_fullscreen)
+        self.min_max_btn.config(text="Minimize" if not is_fullscreen else "Maximize")
         if is_fullscreen:
-            self.min_max_btn.config(text="Minimize")
-            # Restore full screen (no geometry needed)
-        else:
-            self.min_max_btn.config(text="Maximize")
             self.root.geometry("1024x600")
 
     def _build_home_tab(self):
@@ -207,13 +208,13 @@ class ACSSGui:
     def _toggle_process(self):
         if not self.process_running:
             if not (self.serial and self.serial.is_open):
-                self._log_message("Open serial first.", console_only=True)
+                self._log_message("Error: Serial port not open. Check connection.")
                 return
             if not self.yolo:
-                self._log_message("YOLO model not loaded.", console_only=True)
+                self._log_message("Error: YOLO model not loaded.")
                 return
             if not self.camera_running:
-                self._log_message("Camera not running.", console_only=True)
+                self._log_message("Error: Camera not running.")
                 return
             self.process_btn.config(text="Stop Process", bg="red")
             self._log_message("System Started")
@@ -226,7 +227,7 @@ class ACSSGui:
             self.process_running = False
 
     def _log_message(self, msg, console_only=False):
-        print(msg)  # Always print to console for debugging
+        print(msg)
         if console_only:
             return
         ts = time.strftime("%H:%M:%S")
@@ -280,10 +281,10 @@ class ACSSGui:
         self.end_time_label = tk.Label(stats_frame, text="N/A")
         self.end_time_label.grid(row=row_offset+3, column=1, padx=8, pady=4)
 
-        # Reset button
         tk.Button(stats_frame, text="Reset Statistics", font=("Arial", 10), command=self._reset_stats).grid(row=row_offset+4, column=0, columnspan=3, pady=10)
 
     def _reset_stats(self):
+        self.send_cmd("RESET")
         for cat in ["Raw", "Standard", "Overcooked"]:
             self.stats[cat] = 0
             self.moisture_sums[cat] = 0.0
@@ -292,12 +293,12 @@ class ACSSGui:
         self.stats['end_time'] = None
         self.copra_counter = 0
         self.update_stats()
+        self._log_message("Statistics and Arduino state reset.")
 
     def _build_about_tab(self):
         frm = tk.Frame(self.about_tab)
         frm.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Scrollable canvas for content
         canvas = tk.Canvas(frm)
         scrollbar = ttk.Scrollbar(frm, orient="vertical", command=canvas.yview)
         scrollable_frame = tk.Frame(canvas)
@@ -313,33 +314,28 @@ class ACSSGui:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # Content in scrollable frame (Word-like formatting)
         about_frame = tk.LabelFrame(scrollable_frame, text="About ACSS", font=("Arial", 14, "bold"))
         about_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Title block
         tk.Label(about_frame, text="Automated Copra Segregation System", font=("Arial", 16, "bold")).pack(pady=5)
         tk.Label(about_frame, text="Version: 1.0\nDeveloped for Practice and Design 2\nMarinduque State University, 2025",
                 font=("Arial", 12), justify="center").pack(pady=5)
 
-        # Image placeholder at top-center
         try:
             img = Image.open("resources/profiles/acss-3d.png")
-            img = img.resize((200, 200), Image.LANCZOS)  # ANTIALIAS is deprecated, use LANCZOS
+            img = img.resize((200, 200), Image.LANCZOS)
             photo = ImageTk.PhotoImage(img)
             img_label = tk.Label(about_frame, image=photo)
-            img_label.image = photo  # Keep reference
+            img_label.image = photo
             img_label.pack(pady=10)
         except Exception as e:
-            tk.Label(about_frame, text="Image placeholder (jerald.png)", bg="gray", font=("Arial", 12)).pack(pady=10)
+            tk.Label(about_frame, text="Image placeholder (acss-3d.png)", bg="gray", font=("Arial", 12)).pack(pady=10)
 
-        # Description
         tk.Label(about_frame, text="Project Description", font=("Arial", 14, "bold")).pack(anchor="w", pady=10)
         tk.Label(about_frame,
                 text=" The Automated Copra Segregation System (ACSS) is a prototype designed to help sort copra based on its quality using a camera and sensors. The system classifies copra into three types: Raw, Standard, and Overcooked, as it moves along a conveyor. By automating this process, the system aims to lessen manual work, make sorting faster, and provide a more consistent way to assess copra quality.",
                 font=("Arial", 12), justify="left", wraplength=900).pack(pady=5)
 
-        # Objectives
         tk.Label(about_frame, text="Objectives", font=("Arial", 14, "bold")).pack(anchor="w", pady=10)
         objectives = [
             "a) Improve efficiency in copra processing by automating classification and sorting.",
@@ -349,7 +345,6 @@ class ACSSGui:
         for obj in objectives:
             tk.Label(about_frame, text=obj, font=("Arial", 12), justify="left").pack(anchor="w", padx=20, pady=2)
 
-        # Team profiles (2x2 grid)
         tk.Label(about_frame, text="Development Team", font=("Arial", 14, "bold")).pack(anchor="w", pady=10)
         team_frame = tk.Frame(about_frame)
         team_frame.pack(pady=10)
@@ -402,71 +397,76 @@ class ACSSGui:
     def open_serial(self):
         try:
             if not SERIAL_AVAILABLE:
-                self._log_message("pyserial not available.", console_only=True)
+                self._log_message("Error: pyserial not installed.")
                 return
             if self.serial and self.serial.is_open:
-                self._log_message("Serial already open.", console_only=True)
+                print("Serial already open.")
                 return
             self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
-            self._log_message(f"Opened serial {SERIAL_PORT}@{SERIAL_BAUD}", console_only=True)
+            self._log_message(f"Connected to Arduino on {SERIAL_PORT}@{SERIAL_BAUD}")
             self.serial_reader_thread_obj = threading.Thread(target=self.serial_reader_thread, daemon=True)
             self.serial_reader_thread_obj.start()
-            self._log_message("Serial reader thread started.", console_only=True)
+            print("Serial reader thread started.")
         except Exception as e:
-            self._log_message(f"Failed to open serial: {e}", console_only=True)
+            self._log_message(f"Failed to connect to Arduino: {e}")
 
     def close_serial(self):
         try:
             if self.serial and self.serial.is_open:
-                # Send RESET to clean up Arduino state
                 self.send_cmd("RESET")
                 self.serial.close()
-                self._log_message("Serial closed.", console_only=True)
+                self._log_message("Serial connection closed.")
         except Exception as e:
-            self._log_message(f"Error closing serial: {e}", console_only=True)
+            self._log_message(f"Error closing serial: {e}")
 
     def send_cmd(self, text):
-        """Send any general command to Arduino with newline + flush"""
         try:
             if not self.serial or not self.serial.is_open:
-                self._log_message(f"Serial not open — can't send: {text}", console_only=True)
+                self._log_message(f"Serial not open — can't send: {text}")
                 return
             full_cmd = (text.strip().upper() + "\n").encode('utf-8')
             with self.serial_lock:
                 self.serial.write(full_cmd)
                 self.serial.flush()
+            print(f"Sent to Arduino: {text}")
         except Exception as e:
-            self._log_message(f"Failed to send command '{text}': {e}", console_only=True)
+            self._log_message(f"Failed to send command '{text}': {e}")
 
     def serial_reader_thread(self):
-        self._log_message("Serial reader started.", console_only=True)
+        print("Serial reader started.")
         try:
             while self.serial and self.serial.is_open and self.running:
                 try:
                     line = self.serial.readline().decode(errors='ignore').strip()
                     if not line:
                         continue
-                    print(f"ARDUINO: {line}")  # Print all serial lines to console for debugging
+                    # Log all Arduino messages to console only
+                    print(f"ARDUINO: {line}")
                     if line.startswith("ACK,AT_CAM"):
-                        # Trigger classification on AT_CAM
                         self.perform_classification()
-                    # Other ACKs can be handled if needed
+                    elif line == "ERR,MOTOR_TIMEOUT":
+                        print("Error: Object missed camera sensor. Check sensor alignment or conveyor timing.")
                 except Exception as e:
                     if not self.serial_error_logged:
-                        self._log_message(f"Serial reader exception: {e}", console_only=True)
+                        self._log_message(f"Serial reader error: {e}")
                         self.serial_error_logged = True
                     time.sleep(0.2)
         except Exception as outer:
-            self._log_message(f"Serial reader crashed: {outer}", console_only=True)
+            self._log_message(f"Serial reader crashed: {outer}")
 
     def perform_classification(self):
-        """Perform YOLO detection and send classification to Arduino."""
+        """Perform YOLO detection and send classification to Arduino within timeout."""
+        start_time = time.time()
         try:
             with self.frame_lock:
-                if self.latest_frame is None:
-                    self._log_message("No frame available for classification.", console_only=True)
+                if self.latest_frame is None or (time.time() - self.latest_frame_time) > MAX_FRAME_AGE_S:
+                    self._log_message("No recent frame available for classification.")
                     return
                 frame = self.latest_frame.copy()
+
+            if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
+                self._log_message("Classification timeout: Frame capture too slow.")
+                return
 
             results = self.yolo.predict(
                 source=frame,
@@ -474,6 +474,10 @@ class ACSSGui:
                 max_det=3,
                 verbose=False
             )
+
+            if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
+                self._log_message("Classification timeout: YOLO prediction too slow.")
+                return
 
             has_detection = results and results[0].boxes and len(results[0].boxes) > 0
 
@@ -486,7 +490,6 @@ class ACSSGui:
                     cls = cls_tensor[i]
                     conf = conf_tensor[i]
                     if conf > 0.3:
-                        # Adjusted moisture ranges
                         if cls == 0:  # Raw
                             moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
                         elif cls == 1:  # Standard
@@ -498,41 +501,41 @@ class ACSSGui:
                         candidates.append((cls, conf, moisture))
 
                 if candidates:
-                    # Pick the one with highest confidence
                     candidates.sort(key=lambda x: x[1], reverse=True)
-                    leading = candidates[0]
-                    cls, conf, moisture = leading
+                    cls, conf, moisture = candidates[0]
                     category = self.category_map.get(cls, 'Overcooked')
                     class_str = category.upper()
                     self.send_cmd(class_str)
                     self.copra_counter += 1
                     self._log_message(f"{category} Copra # {self.copra_counter:04d}")
                     self._log_message(f"Moisture: {moisture}%")
-                    # Update stats immediately since classification sent
                     self.stats[category] += 1
                     self.stats['total'] += 1
                     self.moisture_sums[category] += moisture
                     self.root.after(0, self.update_stats)
+                else:
+                    self._log_message("No confident detection; no classification sent.")
+            else:
+                self._log_message("No objects detected by YOLO.")
         except Exception as e:
-            self._log_message(f"Classification error: {e}", console_only=True)
+            self._log_message(f"Classification error: {e}")
 
     def start_process(self):
         try:
             if not (self.serial and self.serial.is_open):
-                self._log_message("Open serial first.", console_only=True)
+                self._log_message("Error: Serial port not open. Check connection.")
                 return
             if not self.yolo:
-                self._log_message("YOLO model not loaded.", console_only=True)
+                self._log_message("Error: YOLO model not loaded.")
                 return
             self.send_cmd("AUTO_ENABLE")
             self.stats['start_time'] = time.time()
             self.stats['end_time'] = None
             self.serial_error_logged = False
             self.frame_drop_logged = False
-            self._log_message("Process started: Auto mode enabled.", console_only=True)
-            self.root.after(0, self.update_stats)
+            self._log_message("Process started: Auto mode enabled.")
         except Exception as e:
-            self._log_message(f"Start process error: {e}", console_only=True)
+            self._log_message(f"Start process error: {e}")
 
     def stop_process(self):
         try:
@@ -540,17 +543,17 @@ class ACSSGui:
             self.stats['end_time'] = time.time()
             self.serial_error_logged = False
             self.frame_drop_logged = False
-            self._log_message("Process stopped: Auto mode disabled.", console_only=True)
+            self._log_message("Process stopped: Auto mode disabled.")
             self.root.after(0, self.update_stats)
         except Exception as e:
-            self._log_message(f"Stop process error: {e}", console_only=True)
+            self._log_message(f"Stop process error: {e}")
 
     def start_camera(self):
         if self.camera_running:
-            self._log_message("Camera already running.", console_only=True)
+            print("Camera already running.")
             return
         if not PICAMERA2_AVAILABLE:
-            self._log_message("picamera2 not available.", console_only=True)
+            self._log_message("Error: picamera2 not available.")
             self.process_btn.config(state='disabled')
             return
         try:
@@ -560,27 +563,27 @@ class ACSSGui:
             )
             self.picam2.configure(config)
             self.picam2.start()
-            time.sleep(1)  # Warm-up as in demo code
+            time.sleep(1)
             self.camera_running = True
             self.camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
             self.camera_thread.start()
-            self._log_message("Camera started.", console_only=True)
+            self._log_message("Camera started.")
         except Exception as e:
-            self._log_message(f"Camera start failed: {e}", console_only=True)
+            self._log_message(f"Camera start failed: {e}")
             self.process_btn.config(state='disabled')
 
     def stop_camera(self):
         try:
             if not self.camera_running:
-                self._log_message("Camera not running.", console_only=True)
+                print("Camera not running.")
                 return
             self.camera_running = False
             if self.picam2:
                 self.picam2.stop()
                 self.picam2 = None
-            self._log_message("Camera stopped.", console_only=True)
+            self._log_message("Camera stopped.")
         except Exception as e:
-            self._log_message(f"Camera stop error: {e}", console_only=True)
+            self._log_message(f"Camera stop error: {e}")
 
     def camera_loop(self):
         frame_counter = 0
@@ -594,33 +597,32 @@ class ACSSGui:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
                 current_time = time.time()
-                # Suppress frame drop logs
                 if current_time - last_frame_time > 0.2:
                     if not self.frame_drop_logged:
-                        self._log_message(f"Frame drop detected: {current_time - last_frame_time:.3f}s", console_only=True)
+                        print(f"Frame drop detected: {current_time - last_frame_time:.3f}s")
                         self.frame_drop_logged = True
                 last_frame_time = current_time
 
                 with self.frame_lock:
                     self.latest_frame = frame
+                    self.latest_frame_time = current_time
 
-                # Update display every other frame
                 display_skip = (display_skip + 1) % 2
                 if display_skip == 0:
-                    display_frame = frame.copy()  # No YOLO annotation needed unless desired
+                    display_frame = frame.copy()
                     display_frame = cv2.resize(display_frame, CAM_PREVIEW_SIZE)
                     self.update_canvas_with_frame(display_frame)
 
                 frame_counter += 1
                 if frame_counter >= 50 and current_time - last_fps_log > 5.0:
                     fps = frame_counter / (current_time - fps_time)
-                    self._log_message(f"FPS: {fps:.1f}", console_only=True)
-                    fps_time = time.time()
+                    print(f"FPS: {fps:.1f}")
+                    fps_time = current_time
                     frame_counter = 0
 
                 time.sleep(0.01)
             except Exception as e:
-                self._log_message(f"Camera loop error: {e}", console_only=True)
+                self._log_message(f"Camera loop error: {e}")
                 time.sleep(0.2)
 
     def update_canvas_with_frame(self, bgr_frame):
@@ -635,7 +637,7 @@ class ACSSGui:
                 cv2.imshow("Camera Preview", bgr_frame)
                 cv2.waitKey(1)
         except Exception as e:
-            self._log_message(f"Display frame error: {e}", console_only=True)
+            self._log_message(f"Display frame error: {e}")
 
     def update_stats(self):
         try:
@@ -655,7 +657,7 @@ class ACSSGui:
             self.end_time_label.config(text=end_str)
             self.root.update()
         except Exception as e:
-            self._log_message(f"Stats update error: {type(e).__name__}: {str(e)}", console_only=True)
+            self._log_message(f"Stats update error: {e}")
 
     def on_close(self):
         self.running = False
@@ -664,7 +666,7 @@ class ACSSGui:
         self.stop_process()
         self.stop_camera()
         self.close_serial()
-        self._log_message("Application closed.", console_only=True)
+        self._log_message("Application closed.")
         self.root.destroy()
 
 if __name__ == "__main__":

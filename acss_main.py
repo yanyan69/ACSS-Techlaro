@@ -1,11 +1,30 @@
 #!/usr/bin/env python3
 """
-ACSS GUI with Tabs, Process Control, and Servo Fixes (Simplified).
-- Optimized for 95 RPM conveyor at 80% speed.
-- Reacts to Arduino's ACK,AT_CAM with YOLO classification, motor runs continuously.
-- Suitable for controlled scenarios with one copra at a time.
-- AS7263 used as light indicator, handled by Arduino.
-- Suppressed spammy logs, full screen, reset stats.
+Automated Copra Segregation System (ACSS) GUI
+- Provides a user interface for controlling and monitoring the copra segregation process.
+- Integrates with Arduino via serial for automated detection and sorting using ultrasonic sensors and servos.
+- Uses YOLO for copra classification (Raw, Standard, Overcooked) based on camera frames triggered by Arduino.
+- Displays real-time camera preview, logs (system events, classifications, moisture estimates), and statistics (pieces processed, average moisture).
+- About tab with project description, objectives, and team profiles.
+- Exit tab for safe shutdown.
+
+Expected Functionalities:
+- Home Tab: Start/Stop process (enables/disables Arduino auto mode), camera preview, log display.
+- Statistics Tab: Tracks processed copra by category, average moisture (estimated from YOLO confidence), total counts, and timestamps.
+- About Tab: Project info, objectives, team profiles with images; scrollable if content overflows; floating min/max button to toggle full-screen.
+- Exit Tab: Graceful exit with confirmation, stopping processes and closing serial/camera.
+- Serial Interaction: Sends AUTO_ENABLE/DISABLE and classifications; receives ACK,AT_CAM to trigger YOLO.
+- Moisture Estimation: Based on YOLO confidence (Raw: 7.1-60%, Standard: 6-7%, Overcooked: 4-5.9%).
+
+Setup Instructions:
+1. Install dependencies: pip install pyserial opencv-python numpy picamera2 ultralytics pillow
+2. Connect Arduino to Raspberry Pi via USB (ensure SERIAL_PORT matches, e.g., /dev/ttyUSB0).
+3. Place YOLO model file at YOLO_MODEL_PATH (train or download a copra-specific model).
+4. Place team profile images in resources/profiles/ (christian.png, marielle.png, jerald.png, johnpaul.png).
+5. Run on Raspberry Pi with camera module enabled (raspi-config > Interface > Camera > Enable).
+6. Adjust SERIAL_PORT and YOLO_MODEL_PATH if needed.
+7. Start the script: python3 this_script.py
+- Note: Runs in full-screen (1024x600); use About tab button to minimize/maximize.
 """
 
 import tkinter as tk
@@ -42,7 +61,7 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (640, 480)  # Matches Arduino-timed conveyor
+CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution as requested
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
@@ -53,7 +72,7 @@ YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
 class ACSSGui:
     def __init__(self, root):
         self.root = root
-        root.title("Automated Copra Segregation System (Simplified)")
+        root.title("Automated Copra Segregation System")
         # Set full screen for 1024x600
         self.root.attributes('-fullscreen', True)
 
@@ -125,6 +144,33 @@ class ACSSGui:
             self.process_btn.config(state='disabled')
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Bind tab change to show/hide min/max button
+        notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        # Min/Max button (initially hidden)
+        self.min_max_btn = tk.Button(root, text="Minimize", command=self._toggle_fullscreen,
+                                     font=("Arial", 10), bg="gray", fg="white")
+        self.min_max_btn.place(relx=0.95, rely=0.95, anchor='se')  # Bottom-right
+        self.min_max_btn.place_forget()  # Hide initially
+
+    def _on_tab_changed(self, event):
+        notebook = event.widget
+        selected_tab = notebook.select()
+        if notebook.tab(selected_tab, "text") == "About":
+            self.min_max_btn.place(relx=0.95, rely=0.95, anchor='se')
+        else:
+            self.min_max_btn.place_forget()
+
+    def _toggle_fullscreen(self):
+        is_fullscreen = self.root.attributes('-fullscreen')
+        self.root.attributes('-fullscreen', not is_fullscreen)
+        if is_fullscreen:
+            self.min_max_btn.config(text="Minimize")
+            # Restore full screen (no geometry needed)
+        else:
+            self.min_max_btn.config(text="Maximize")
+            self.root.geometry("1024x600")
 
     def _build_home_tab(self):
         frm = tk.Frame(self.home_tab)
@@ -249,17 +295,88 @@ class ACSSGui:
 
     def _build_about_tab(self):
         frm = tk.Frame(self.about_tab)
-        frm.pack(fill="both", expand=True, padx=8, pady=8)
+        frm.pack(fill="both", expand=True, padx=10, pady=10)
 
-        about_frame = tk.LabelFrame(frm, text="About ACSS")
-        about_frame.pack(fill="both", expand=True, padx=4, pady=4)
+        # Scrollable canvas for content
+        canvas = tk.Canvas(frm)
+        scrollbar = ttk.Scrollbar(frm, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
 
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Content in scrollable frame (Word-like formatting)
+        about_frame = tk.LabelFrame(scrollable_frame, text="About ACSS", font=("Arial", 14, "bold"))
+        about_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Title block
+        tk.Label(about_frame, text="Automated Copra Segregation System", font=("Arial", 16, "bold")).pack(pady=5)
+        tk.Label(about_frame, text="Version: 1.0\nDeveloped for Practice and Design 2\nMarinduque State University, 2025",
+                font=("Arial", 12), justify="center").pack(pady=5)
+
+        # Image placeholder at top-center
+        try:
+            img = Image.open("resources/profiles/acss-3d.png")
+            img = img.resize((200, 200), Image.LANCZOS)  # ANTIALIAS is deprecated, use LANCZOS
+            photo = ImageTk.PhotoImage(img)
+            img_label = tk.Label(about_frame, image=photo)
+            img_label.image = photo  # Keep reference
+            img_label.pack(pady=10)
+        except Exception as e:
+            tk.Label(about_frame, text="Image placeholder (jerald.png)", bg="gray", font=("Arial", 12)).pack(pady=10)
+
+        # Description
+        tk.Label(about_frame, text="Project Description", font=("Arial", 14, "bold")).pack(anchor="w", pady=10)
         tk.Label(about_frame,
-                 text="Automated Copra Segregation System\n\n"
-                      "Version: 1.0\n"
-                      "Developed for Practice and Design 2\n"
-                      "Marinduque State University, 2025",
-                 font=("Arial", 12), justify="center").pack(pady=40)
+                text=" The Automated Copra Segregation System (ACSS) is a prototype designed to help sort copra based on its quality using a camera and sensors. The system classifies copra into three types: Raw, Standard, and Overcooked, as it moves along a conveyor. By automating this process, the system aims to lessen manual work, make sorting faster, and provide a more consistent way to assess copra quality.",
+                font=("Arial", 12), justify="left", wraplength=900).pack(pady=5)
+
+        # Objectives
+        tk.Label(about_frame, text="Objectives", font=("Arial", 14, "bold")).pack(anchor="w", pady=10)
+        objectives = [
+            "• Improve efficiency in copra processing by automating classification and sorting.",
+            "• Reduce manual labor and human error in quality assessment.",
+            "• Enhance accuracy using computer vision (YOLO) and sensor data for real-time decisions."
+        ]
+        for obj in objectives:
+            tk.Label(about_frame, text=obj, font=("Arial", 12), justify="left").pack(anchor="w", padx=20, pady=2)
+
+        # Team profiles (2x2 grid)
+        tk.Label(about_frame, text="Development Team", font=("Arial", 14, "bold")).pack(anchor="w", pady=10)
+        team_frame = tk.Frame(about_frame)
+        team_frame.pack(pady=10)
+
+        team_members = [
+            ("jerald.png", "Jerald", "Project Lead & Systems Integrator"),
+            ("christian.png", "Christian", "Software & Electronics Developer"),
+            ("johnpaul.png", "John Paul", "Mechanical Design & Fabrication Engineer"),
+            ("marielle.png", "Marielle", "Technical Documentation & Quality Analyst")
+        ]
+
+        for i, (img_path, name, title) in enumerate(team_members):
+            member_frame = tk.Frame(team_frame)
+            member_frame.grid(row=i//2, column=i%2, padx=20, pady=10, sticky="n")
+
+            try:
+                img = Image.open(f"resources/profiles/{img_path}")
+                img = img.resize((100, 100), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                img_label = tk.Label(member_frame, image=photo)
+                img_label.image = photo
+                img_label.pack()
+            except Exception as e:
+                tk.Label(member_frame, text=f"{name} Image", bg="gray", font=("Arial", 10)).pack()
+
+            tk.Label(member_frame, text=name, font=("Arial", 12, "bold")).pack(pady=2)
+            tk.Label(member_frame, text=title, font=("Arial", 10)).pack()
 
     def _build_exit_tab(self):
         frm = tk.Frame(self.exit_tab)
@@ -269,11 +386,11 @@ class ACSSGui:
         exit_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         tk.Label(exit_frame, text="Click the button below to close the program.",
-                 font=("Arial", 12)).pack(pady=20)
+                font=("Arial", 12)).pack(pady=20)
 
         tk.Button(exit_frame, text="Exit Program", fg="white", bg="red",
-                  font=("Arial", 14, "bold"), width=20,
-                  command=self._exit_program).pack(pady=30)
+                font=("Arial", 14, "bold"), width=20,
+                command=self._exit_program).pack(pady=30)
 
     def _exit_program(self):
         if messagebox.askokcancel("Exit", "Are you sure you want to exit?"):
@@ -333,7 +450,7 @@ class ACSSGui:
                     if line.startswith("ACK,AT_CAM"):
                         # Trigger classification on AT_CAM
                         self.perform_classification()
-                    # Ignore other messages (e.g., AS:, TRIG:, ERR:, DBG:)
+                    # Other ACKs can be handled if needed
                 except Exception as e:
                     if not self.serial_error_logged:
                         self._log_message(f"Serial reader exception: {e}", console_only=True)
@@ -361,6 +478,7 @@ class ACSSGui:
             has_detection = results and results[0].boxes and len(results[0].boxes) > 0
 
             if has_detection:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
                 cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                 conf_tensor = results[0].boxes.conf.cpu().numpy()
                 candidates = []
@@ -489,7 +607,7 @@ class ACSSGui:
                 # Update display every other frame
                 display_skip = (display_skip + 1) % 2
                 if display_skip == 0:
-                    display_frame = frame.copy()  # No YOLO annotation needed
+                    display_frame = frame.copy()  # No YOLO annotation needed unless desired
                     display_frame = cv2.resize(display_frame, CAM_PREVIEW_SIZE)
                     self.update_canvas_with_frame(display_frame)
 

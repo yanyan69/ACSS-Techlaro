@@ -17,13 +17,12 @@
 #define MOTOR_PWMA 9   // PWM pin
 #define MOTOR_STBY 6
 
-const int MOTOR_SPEED = 255;
-const unsigned long TIME_TO_CAM_MS = 3000; // start → camera
-const unsigned long TIME_TO_NIR_MS = 750;  // camera → NIR
-const unsigned long TIME_TO_FLAPPER_MS = 10000; // NIR → flapper (max window)
+const int MOTOR_SPEED = 200;
+const unsigned long TIME_TO_CAM_MS = 3000; // start → camera (unused now, but kept for reference)
+const unsigned long TIME_TO_NIR_MS = 500;  // camera → NIR
+const unsigned long TIME_TO_FLAPPER_MS = 500; // NIR → flapper (max window)
 const unsigned long CLEAR_TIME_MS = 1000;
-const unsigned long MOVE_PAUSE_MS = 10;
-const unsigned long NIR_READ_DELAY_MS = 1000;
+const unsigned long CLASS_WAIT_MS = 3000; // wait time at camera for classification
 
 #define LEFT_SERVO_PIN 5
 #define RIGHT_SERVO_PIN 13
@@ -33,13 +32,18 @@ const int RIGHT_NEUTRAL_ANGLE = 40;
 const int LEFT_PUSH_ANGLE = LEFT_NEUTRAL_ANGLE + 90;
 const int RIGHT_PUSH_ANGLE = RIGHT_NEUTRAL_ANGLE + 90;
 const unsigned long SERVO_PUSH_HOLD_MS = 500;
-const unsigned long SERVO_COOLDOWN_MS = 500;
 
 #define START_ULTRA_TRIG 3
 #define START_ULTRA_ECHO 14
 const int START_DETECT_DISTANCE_CM = 7;
 const unsigned long DETECT_COOLDOWN_MS = 500;
 const unsigned long ULTRA_CHECK_INTERVAL_MS = 100;
+
+#define CAM_ULTRA_TRIG 11
+#define CAM_ULTRA_ECHO 15  // A1
+const int CAM_DETECT_DISTANCE_CM = 7;
+const unsigned long CAM_DETECT_COOLDOWN_MS = 500;
+const unsigned long CAM_ULTRA_CHECK_INTERVAL_MS = 100;
 
 #define FLAP_ULTRA_TRIG 10
 #define FLAP_ULTRA_ECHO 2
@@ -62,14 +66,14 @@ AS726X sensor;
 enum SystemState {
   IDLE,
   MOVING_TO_FLAPPER,
-  AT_FLAPPER
+  AT_FLAPPER,
+  AT_CAM
 };
 SystemState currentState = IDLE;
 
 bool isMotorMoving = false;
 unsigned long motorStartTime = 0;
 unsigned long motorDuration = 0;
-unsigned long moveEndPauseTime = 0;
 bool motorForward = true;
 
 bool isServoActive = false;
@@ -78,15 +82,16 @@ char activeServo = 'N';
 
 unsigned long lastStartDetectTime = 0;
 unsigned long lastStartUltraCheck = 0;
+unsigned long lastCamDetectTime = 0;
+unsigned long lastCamUltraCheck = 0;
 unsigned long lastFlapDetectTime = 0;
 unsigned long lastFlapUltraCheck = 0;
 
-unsigned long nirReadStartTime = 0;
-bool nirReadingStarted = false;
+unsigned long classWaitStart = 0;
 
-bool autoMode = true; // false = manual
 String copraClass = "";
-bool sentAtCam = false;
+
+bool autoEnabled = false;
 
 // ===============================================================
 // FIFO QUEUE (per-item timing/state)
@@ -98,6 +103,7 @@ struct CopraItem {
   bool atCamNotified;        // ACK,AT_CAM sent for this item
   bool nirRequested;         // NIR read has been requested for this item
   unsigned long detectedAt;  // millis when START ultrasonic detected this item
+  unsigned long camArrivedAt; // millis when CAM ultrasonic detected this item
 };
 
 CopraItem fifoQueue[MAX_QUEUE];
@@ -112,6 +118,7 @@ void clearQueue() {
     fifoQueue[i].atCamNotified = false;
     fifoQueue[i].nirRequested = false;
     fifoQueue[i].detectedAt = 0;
+    fifoQueue[i].camArrivedAt = 0;
   }
   headIndex = 0;
   tailIndex = 0;
@@ -126,25 +133,6 @@ bool isQueueEmpty() {
   return queueCount == 0;
 }
 
-void printQueueState() {
-  Serial.print("QUEUE(");
-  Serial.print(queueCount);
-  Serial.print("): ");
-  for (int i = 0; i < queueCount; i++) {
-    int idx = (headIndex + i) % MAX_QUEUE;
-    Serial.print("[");
-    Serial.print(idx);
-    Serial.print(":");
-    Serial.print(fifoQueue[idx].valid ? "V" : " ");
-    Serial.print(",");
-    Serial.print(fifoQueue[idx].atCamNotified ? "CAM" : "");
-    Serial.print(",");
-    Serial.print(fifoQueue[idx].classification);
-    Serial.print("] ");
-  }
-  Serial.println();
-}
-
 // Enqueue a placeholder when start-ultrasonic detects an object
 void enqueuePlaceholder(unsigned long detectedTime) {
   if (isQueueFull()) {
@@ -156,6 +144,7 @@ void enqueuePlaceholder(unsigned long detectedTime) {
   fifoQueue[tailIndex].atCamNotified = false;
   fifoQueue[tailIndex].nirRequested = false;
   fifoQueue[tailIndex].detectedAt = detectedTime;
+  fifoQueue[tailIndex].camArrivedAt = 0;
   tailIndex = (tailIndex + 1) % MAX_QUEUE;
   queueCount++;
   Serial.print("ACK,ENQUEUE_PLACEHOLDER,idx=");
@@ -174,6 +163,7 @@ void assignClassificationToEarliestAtCam(String cls) {
       fifoQueue[tailIndex].atCamNotified = false;
       fifoQueue[tailIndex].nirRequested = false;
       fifoQueue[tailIndex].detectedAt = millis();
+      fifoQueue[tailIndex].camArrivedAt = 0;
       tailIndex = (tailIndex + 1) % MAX_QUEUE;
       queueCount++;
       Serial.print("ACK,ENQUEUE_DIRECT,");
@@ -204,6 +194,7 @@ void assignClassificationToEarliestAtCam(String cls) {
     fifoQueue[tailIndex].atCamNotified = false;
     fifoQueue[tailIndex].nirRequested = false;
     fifoQueue[tailIndex].detectedAt = millis();
+    fifoQueue[tailIndex].camArrivedAt = 0;
     tailIndex = (tailIndex + 1) % MAX_QUEUE;
     queueCount++;
     Serial.print("ACK,ENQUEUE_LATE,");
@@ -223,6 +214,7 @@ String dequeueItem() {
   fifoQueue[headIndex].atCamNotified = false;
   fifoQueue[headIndex].nirRequested = false;
   fifoQueue[headIndex].detectedAt = 0;
+  fifoQueue[headIndex].camArrivedAt = 0;
   headIndex = (headIndex + 1) % MAX_QUEUE;
   queueCount--;
   Serial.print("ACK,DEQUEUE,idx=");
@@ -253,6 +245,8 @@ void setup() {
 
   pinMode(START_ULTRA_TRIG, OUTPUT);
   pinMode(START_ULTRA_ECHO, INPUT);
+  pinMode(CAM_ULTRA_TRIG, OUTPUT);
+  pinMode(CAM_ULTRA_ECHO, INPUT);
   pinMode(FLAP_ULTRA_TRIG, OUTPUT);
   pinMode(FLAP_ULTRA_ECHO, INPUT);
 
@@ -268,13 +262,12 @@ void setup() {
   } else {
     sensor.enableIndicator();
     sensor.setIndicatorCurrent(3);
-    sensor.disableBulb();
     sensor.setBulbCurrent(3);
     Serial.println("AS7263 ready");
   }
 
   clearQueue();
-  Serial.println("Arduino ready (FIFO-enabled). Default: AUTO mode");
+  Serial.println("Arduino ready (FIFO-enabled). AUTO mode disabled - send AUTO_ENABLE to start");
 }
 
 // ===============================================================
@@ -293,7 +286,6 @@ void startMotorMove(unsigned long duration_ms, bool forward = true) {
   motorStartTime = millis();
   motorDuration = duration_ms;
   isMotorMoving = true;
-  moveEndPauseTime = 0;
   Serial.print("ACK,MOTOR,START,");
   Serial.println(duration_ms);
 }
@@ -303,18 +295,14 @@ void stopMotor() {
   digitalWrite(MOTOR_AIN2, LOW);
   analogWrite(MOTOR_PWMA, 0);
   isMotorMoving = false;
-  moveEndPauseTime = 0;
   Serial.println("ACK,MOTOR,DONE");
 }
 
 void updateMotor() {
   if (!isMotorMoving) return;
   unsigned long now = millis();
-  if (now - motorStartTime >= motorDuration && moveEndPauseTime == 0) {
+  if (now - motorStartTime >= motorDuration) {
     stopMotor();
-  }
-  if (moveEndPauseTime > 0 && now - moveEndPauseTime >= MOVE_PAUSE_MS) {
-    moveEndPauseTime = 0;
   }
 }
 
@@ -372,7 +360,10 @@ void checkStartUltrasonicTrigger() {
   lastStartUltraCheck = now;
 
   float dist = getDistanceCM(START_ULTRA_TRIG, START_ULTRA_ECHO);
-  if (autoMode && dist > 0 && dist < START_DETECT_DISTANCE_CM && (now - lastStartDetectTime > DETECT_COOLDOWN_MS)) {
+  if (autoEnabled && dist > 0 && dist < START_DETECT_DISTANCE_CM && (now - lastStartDetectTime > DETECT_COOLDOWN_MS)) {
+    Serial.print("DBG,START_ULTRA,DIST=");
+    Serial.print(dist);
+    Serial.println(",DETECTED");
     lastStartDetectTime = now;
     Serial.println("TRIG,START_OBJECT_DETECTED");
     // Enqueue placeholder for this object (timestamped)
@@ -390,13 +381,46 @@ void checkStartUltrasonicTrigger() {
   }
 }
 
+void checkCamUltrasonicTrigger() {
+  unsigned long now = millis();
+  if (now - lastCamUltraCheck < CAM_ULTRA_CHECK_INTERVAL_MS) return;
+  lastCamUltraCheck = now;
+
+  float dist = getDistanceCM(CAM_ULTRA_TRIG, CAM_ULTRA_ECHO);
+  if (dist > 0 && dist < CAM_DETECT_DISTANCE_CM && (now - lastCamDetectTime > CAM_DETECT_COOLDOWN_MS)) {
+    Serial.print("DBG,CAM_ULTRA,DIST=");
+    Serial.print(dist);
+    Serial.println(",DETECTED");
+    lastCamDetectTime = now;
+    Serial.println("TRIG,CAM_OBJECT_DETECTED");
+    stopMotor();
+    currentState = AT_CAM;
+    classWaitStart = now;
+    // Assign to earliest non-notified item
+    for (int i = 0; i < queueCount; i++) {
+      int idx = (headIndex + i) % MAX_QUEUE;
+      if (fifoQueue[idx].valid && !fifoQueue[idx].atCamNotified) {
+        fifoQueue[idx].atCamNotified = true;
+        fifoQueue[idx].camArrivedAt = now;
+        Serial.print("ACK,AT_CAM,idx=");
+        Serial.println(idx);
+        fifoQueue[idx].nirRequested = true;
+        break; // assign to one per detection (earliest)
+      }
+    }
+  }
+}
+
 void checkFlapUltrasonicTrigger() {
   unsigned long now = millis();
   if (now - lastFlapUltraCheck < FLAP_ULTRA_CHECK_INTERVAL_MS || currentState == IDLE) return;
   lastFlapUltraCheck = now;
 
   float dist = getDistanceCM(FLAP_ULTRA_TRIG, FLAP_ULTRA_ECHO);
-  if (autoMode && dist > 0 && dist < FLAP_DETECT_DISTANCE_CM && (now - lastFlapDetectTime > FLAP_DETECT_COOLDOWN_MS)) {
+  if (dist > 0 && dist < FLAP_DETECT_DISTANCE_CM && (now - lastFlapDetectTime > FLAP_DETECT_COOLDOWN_MS)) {
+    Serial.print("DBG,FLAP_ULTRA,DIST=");
+    Serial.print(dist);
+    Serial.println(",DETECTED");
     lastFlapDetectTime = now;
     Serial.println("TRIG,FLAP_OBJECT_DETECTED");
     stopMotor();
@@ -426,7 +450,10 @@ void checkFlapUltrasonicTrigger() {
 // ===============================================================
 // AS Readings (NIR)
 void sendASReadings() {
+  sensor.enableBulb();
+  delay(100); // Short delay to stabilize
   sensor.takeMeasurements();
+  sensor.disableBulb();
   if (sensor.getVersion() == SENSORTYPE_AS7263) {
     Serial.print("AS:");
     Serial.print(sensor.getCalibratedR(), 2); Serial.print(",");
@@ -449,120 +476,25 @@ void sendASReadings() {
 }
 
 // ===============================================================
-// COMMAND HANDLER
+// COMMAND HANDLER (only for classifications)
 void handleCommand(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
 
-  if (cmd == "MOTOR,TEST") {
-    startMotorMove(1000, true);
-  }
-  else if (cmd.startsWith("MOTOR,FWD,")) {
-    startMotorMove(cmd.substring(10).toInt(), true);
-  }
-  else if (cmd.startsWith("MOTOR,REV,")) {
-    startMotorMove(cmd.substring(10).toInt(), false);
-  }
-  else if (cmd == "MOTOR,CAM" && (!autoMode || currentState == IDLE)) {
-    currentState = MOVING_TO_FLAPPER;
-    startMotorMove(TIME_TO_CAM_MS + TIME_TO_NIR_MS + TIME_TO_FLAPPER_MS);
-  }
-  else if (cmd.startsWith("SORT,")) {
-    String dir = cmd.substring(5);
-    if (dir == "L" && (!autoMode || currentState == AT_FLAPPER)) {
-      triggerServo('L');
-    } else if (dir == "R" && (!autoMode || currentState == AT_FLAPPER)) {
-      triggerServo('R');
-    } else if (dir == "C") {
-      startMotorMove(CLEAR_TIME_MS);
-      Serial.println("ACK,SORT,C");
-    } else {
-      Serial.println("Unknown sort direction.");
-    }
-  }
-  else if (cmd == "SORT,NEUTRAL") {
-    servosNeutral();
-    Serial.println("ACK,SORT,NEUTRAL");
-  }
-  else if (cmd == "REQ_AS") {
-    sendASReadings();
-  }
-  else if (cmd == "MODE,AUTO") {
-    autoMode = true;
-    Serial.println("ACK,MODE,AUTO_ENABLED");
-  }
-  else if (cmd == "MODE,MANUAL") {
-    autoMode = false;
-    currentState = IDLE;
-    Serial.println("ACK,MODE,MANUAL_ENABLED");
-  }
-  else if (cmd == "RESET") {
-    stopMotor();
-    servosNeutral();
-    currentState = IDLE;
-    copraClass = "";
-    lastStartDetectTime = 0;
-    clearQueue();
-    Serial.println("ACK,RESET");
-  }
-  // RPi sends classification strings — assign to earliest at-cam item
-  else if (cmd == "OVERCOOKED" || cmd == "RAW" || cmd == "STANDARD") {
+  if (cmd == "OVERCOOKED" || cmd == "RAW" || cmd == "STANDARD") {
+    Serial.print("DBG,RPI_CLASS_RECEIVED,");
+    Serial.println(cmd);
     assignClassificationToEarliestAtCam(cmd);
-  }
-  else if (cmd == "MOTOR,ON") {
-    startMotorMove(999999, true);
-    Serial.println("ACK");
-  }
-  else if (cmd == "MOTOR,OFF") {
-    stopMotor();
-    Serial.println("ACK");
-  }
-  else if (cmd == "AS_BULB_ON") {
-    if (sensor.getVersion() == SENSORTYPE_AS7263) {
-      sensor.enableBulb();
-      Serial.println("ACK");
-    } else {
-      Serial.println("AS7263 not detected.");
-    }
-  }
-  else if (cmd == "AS_BULB_OFF") {
-    if (sensor.getVersion() == SENSORTYPE_AS7263) {
-      sensor.disableBulb();
-      Serial.println("ACK");
-    } else {
-      Serial.println("AS7263 not detected.");
-    }
-  }
-  else if (cmd.length() == 1) {
-    char ch = cmd.charAt(0);
-    if (ch == 'M') {
-      startMotorMove(2000, true);
-      Serial.println("Motor running forward.");
-    } else if (ch == 'S') {
-      Serial.println("Servo test.");
-      triggerServo('L');
-      delay(1000 + SERVO_PUSH_HOLD_MS);
-      servosNeutral();
-      delay(1000);
-      triggerServo('R');
-      delay(1000 + SERVO_PUSH_HOLD_MS);
-      servosNeutral();
-      Serial.println("Servo test done.");
-    } else if (ch == 'I') {
-      float startDist = getDistanceCM(START_ULTRA_TRIG, START_ULTRA_ECHO);
-      float flapDist = getDistanceCM(FLAP_ULTRA_TRIG, FLAP_ULTRA_ECHO);
-      Serial.print("Start Ultra: ");
-      Serial.print(startDist);
-      Serial.print(" cm, Flap Ultra: ");
-      Serial.print(flapDist);
-      Serial.println(" cm");
-    } else if (ch == 'A') {
-      sendASReadings();
-    } else {
-      Serial.println("Unknown command.");
-    }
-  }
-  else {
+  } else if (cmd == "AUTO_ENABLE") {
+    autoEnabled = true;
+    Serial.println("ACK,AUTO_ENABLED");
+  } else if (cmd == "AUTO_DISABLE") {
+    autoEnabled = false;
+    Serial.println("ACK,AUTO_DISABLED");
+  } else {
+    Serial.print("DBG,RPI_INVALID_CLASS,");
+    Serial.print(cmd);
+    Serial.println(",DEFAULT_TO_OVERCOOKED_AT_FLAPPER");
     Serial.print("ACK,UNKNOWN,");
     Serial.println(cmd);
   }
@@ -582,32 +514,15 @@ void updateStateMachine() {
     {
       unsigned long elapsed = now - motorStartTime;
 
-      // When enough time passed to reach camera: notify earliest queued item that hasn't been notified yet
-      if (elapsed >= TIME_TO_CAM_MS) {
-        for (int i = 0; i < queueCount; i++) {
-          int idx = (headIndex + i) % MAX_QUEUE;
-          if (fifoQueue[idx].valid && !fifoQueue[idx].atCamNotified) {
-            fifoQueue[idx].atCamNotified = true;
-            fifoQueue[idx].detectedAt = fifoQueue[idx].detectedAt == 0 ? now : fifoQueue[idx].detectedAt;
-            Serial.print("ACK,AT_CAM,idx=");
-            Serial.println(idx);
-            fifoQueue[idx].nirRequested = true;
-            break; // only mark one per cam event
-          }
-        }
-      }
-
-      // Handle NIR read window
-      if (elapsed >= (TIME_TO_CAM_MS + TIME_TO_NIR_MS)) {
-        for (int i = 0; i < queueCount; i++) {
-          int idx = (headIndex + i) % MAX_QUEUE;
-          if (fifoQueue[idx].valid && fifoQueue[idx].nirRequested) {
-            Serial.print("ACK,AT_NIR,idx=");
-            Serial.println(idx);
-            sendASReadings();
-            fifoQueue[idx].nirRequested = false;
-            break; // one read per window
-          }
+      // Handle NIR read window (per-item, based on cam arrival)
+      for (int i = 0; i < queueCount; i++) {
+        int idx = (headIndex + i) % MAX_QUEUE;
+        if (fifoQueue[idx].valid && fifoQueue[idx].nirRequested && fifoQueue[idx].camArrivedAt > 0 && (now - fifoQueue[idx].camArrivedAt >= TIME_TO_NIR_MS)) {
+          Serial.print("ACK,AT_NIR,idx=");
+          Serial.println(idx);
+          sendASReadings();
+          fifoQueue[idx].nirRequested = false;
+          break; // one read per cycle (assume sensor handles one at a time)
         }
       }
 
@@ -619,9 +534,30 @@ void updateStateMachine() {
     }
       break;
 
+    case AT_CAM:
+    {
+      // Handle NIR read window (per-item, based on cam arrival)
+      for (int i = 0; i < queueCount; i++) {
+        int idx = (headIndex + i) % MAX_QUEUE;
+        if (fifoQueue[idx].valid && fifoQueue[idx].nirRequested && fifoQueue[idx].camArrivedAt > 0 && (now - fifoQueue[idx].camArrivedAt >= TIME_TO_NIR_MS)) {
+          Serial.print("ACK,AT_NIR,idx=");
+          Serial.println(idx);
+          sendASReadings();
+          fifoQueue[idx].nirRequested = false;
+          break; // one read per cycle (assume sensor handles one at a time)
+        }
+      }
+
+      if (now - classWaitStart >= CLASS_WAIT_MS) {
+        startMotorMove(TIME_TO_NIR_MS + TIME_TO_FLAPPER_MS);
+        currentState = MOVING_TO_FLAPPER;
+      }
+    }
+      break;
+
     case AT_FLAPPER:
       if (!isMotorMoving && !isServoActive) {
-        // ✅ Modified section: Auto-continue if queue still has items
+        // Modified section: Auto-continue if queue still has items
         if (queueCount > 0) {
           currentState = MOVING_TO_FLAPPER;
           startMotorMove(TIME_TO_CAM_MS + TIME_TO_NIR_MS + TIME_TO_FLAPPER_MS);
@@ -646,6 +582,7 @@ void loop() {
   updateMotor();
   updateServo();
   checkStartUltrasonicTrigger();
+  checkCamUltrasonicTrigger();
   checkFlapUltrasonicTrigger();
   updateStateMachine();
 

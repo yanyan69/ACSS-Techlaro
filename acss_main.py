@@ -342,9 +342,9 @@ class ACSSGui:
         # Objectives
         tk.Label(about_frame, text="Objectives", font=("Arial", 14, "bold")).pack(anchor="w", pady=10)
         objectives = [
-            "• Improve efficiency in copra processing by automating classification and sorting.",
-            "• Reduce manual labor and human error in quality assessment.",
-            "• Enhance accuracy using computer vision (YOLO) and sensor data for real-time decisions."
+            "a) Improve efficiency in copra processing by automating classification and sorting.",
+            "b) Reduce manual labor and human error in quality assessment.",
+            "c) Enhance accuracy using computer vision (YOLO) and sensor data for real-time decisions."
         ]
         for obj in objectives:
             tk.Label(about_frame, text=obj, font=("Arial", 12), justify="left").pack(anchor="w", padx=20, pady=2)

@@ -106,7 +106,7 @@ class ACSSGui:
         self.serial_error_logged = False
         self.frame_drop_logged = False
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Arduino maps 'C' to no servo action
+        self.class_to_sort = {0: 'R', 1: 'C', 2: 'L'}  # Raw to 'R' (right), Standard to 'C', Overcooked to 'L' (left)
         self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
         self.stats = {
             'Raw': 0,
@@ -459,9 +459,9 @@ class ACSSGui:
                     elif line.startswith("ACK,CLASS,"):
                         self._log_message(f"Arduino confirmed classification: {line.split(',')[-1]}")
                     elif line == "ACK,SORT,L":
-                        self._log_message("Sorted Raw (left servo).")
+                        self._log_message("Sorted Overcooked (left servo).")
                     elif line == "ACK,SORT,R":
-                        self._log_message("Sorted Overcooked (right servo).")
+                        self._log_message("Sorted Raw (right servo).")
                     elif line == "ACK,MOTOR,START,2000":
                         self._log_message("Moving Standard copra (conveyor).")
                     elif line == "ACK,PING":
@@ -519,6 +519,7 @@ class ACSSGui:
                     return
 
                 has_detection = results and results[0].boxes and len(results[0].boxes) > 0
+                print(f"has_detection: {has_detection}")  # Debug
 
                 if has_detection:
                     boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -539,6 +540,8 @@ class ACSSGui:
                                 moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
                             moisture = round(moisture, 1)
                             candidates.append((cls, conf, moisture))
+
+                    print(f"Candidates: {len(candidates)}")  # Debug
 
                     if candidates:
                         candidates.sort(key=lambda x: x[1], reverse=True)

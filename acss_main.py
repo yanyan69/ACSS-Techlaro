@@ -1,12 +1,31 @@
 #!/usr/bin/env python3
 """
 Automated Copra Segregation System (ACSS) GUI
-- Aligned with Arduino code including 500ms flapper delay (FLAP_CENTER_DELAY_MS) for centering copra.
-- Logs TRIG,FLAP_OBJECT_DETECTED to confirm flapper detection.
-- Parses DBG,CAM_ULTRA for DETECTED, DETECTED_TIMEOUT, DETECTED_JUMP to debug camera sensor.
-- Logs ACK,SORT,L/R and ACK,MOTOR,START,2000 for sorting confirmation.
-- Ensures CLASSIFICATION_TIMEOUT_S (2.0s) aligns with Arduino's CLASS_WAIT_MS (3000ms).
-- Added bounding box drawing in camera preview by default after launch.
+- Provides a user interface for controlling and monitoring the copra segregation process.
+- Integrates with Arduino via serial for automated detection and sorting using ultrasonic sensors and servos.
+- Uses YOLO for copra classification (Raw, Standard, Overcooked) based on camera frames triggered by Arduino.
+- Displays real-time camera preview, logs (classification results, system events), and statistics.
+- About tab with project description, objectives, and team profiles.
+- Exit tab for safe shutdown.
+- Arduino logs (ACK, TRIG, ERR, DBG) are shown in terminal; GUI log shows classification and system events.
+
+Expected Functionalities:
+- Home Tab: Start/Stop process, camera preview with live bounding boxes, log display with classification results and sync errors.
+- Statistics Tab: Tracks processed copra, average moisture, total counts, timestamps.
+- About Tab: Project info, objectives, team profiles with images; scrollable; min/max button.
+- Exit Tab: Graceful exit with confirmation, stopping processes and closing serial/camera.
+- Serial Interaction: Sends AUTO_ENABLE/DISABLE, RESET, PING, classifications; receives ACK,AT_CAM, TRIG, ERR, DBG.
+- Moisture Estimation: Based on YOLO confidence (Raw: 7.1-60%, Standard: 6-7%, Overcooked: 4-5.9%).
+
+Setup Instructions:
+1. Install dependencies: pip install pyserial opencv-python numpy picamera2 ultralytics pillow
+2. Connect Arduino to Raspberry Pi via USB (ensure SERIAL_PORT matches, e.g., /dev/ttyUSB0).
+3. Place YOLO model file at YOLO_MODEL_PATH (train or download a copra-specific model).
+4. Place team profile images in resources/profiles/ (christian.png, marielle.png, jerald.png, johnpaul.png).
+5. Run on Raspberry Pi with camera module enabled (raspi-config > Interface > Camera > Enable).
+6. Adjust SERIAL_PORT and YOLO_MODEL_PATH if needed.
+7. Start the script: python3 this_script.py
+- Note: Runs in full-screen (1024x600); use About tab button to minimize/maximize.
 """
 
 import tkinter as tk
@@ -43,17 +62,17 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution
+CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution as requested
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
-TRACKER_PATH = "bytetrack.yaml"  # For live tracking in preview
+TRACKER_PATH = "bytetrack.yaml"  # Added for live tracking in preview
 CLASSIFICATION_TIMEOUT_S = 2.0  # Within Arduino's CLASS_WAIT_MS = 3000ms
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
-YOLO_FRAME_SKIP = 2  # Run YOLO every 2nd frame for performance
+YOLO_FRAME_SKIP = 2  # Run YOLO every 2nd frame to balance performance
 
 # ---------------------------------------------------
 

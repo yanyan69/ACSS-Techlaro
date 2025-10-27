@@ -10,6 +10,8 @@ Automated Copra Segregation System (ACSS) GUI
 Changes:
 - Set YOLO_FRAME_SKIP = 5 to target ~3 FPS for bounding box updates (assuming ~15 FPS camera).
 - Adjusted camera_loop sleep to stabilize frame rate.
+- Updated perform_classification to use yolo.track for consistency with live preview, fixing cls mismatch.
+- Added cls logging in perform_classification to debug classification vs. preview discrepancies.
 """
 
 import tkinter as tk
@@ -46,16 +48,16 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (640, 480)
+CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
-SERIAL_BAUD = 115200
+SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"
-CLASSIFICATION_TIMEOUT_S = 2.0
-MAX_FRAME_AGE_S = 0.7
-PING_INTERVAL_S = 5.0
-CLASSIFICATION_RETRIES = 2
+CLASSIFICATION_TIMEOUT_S = 2.0  # Within Arduino's CLASS_WAIT_MS = 3000ms
+MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
+PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
+CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 5  # Target ~3 FPS for bounding box updates (assuming ~15 FPS camera)
 
 # ---------------------------------------------------
@@ -104,7 +106,7 @@ class ACSSGui:
         self.serial_error_logged = False
         self.frame_drop_logged = False
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
+        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Arduino maps 'C' to no servo action
         self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
         self.stats = {
             'Raw': 0,
@@ -221,7 +223,7 @@ class ACSSGui:
         print(msg)
         if console_only:
             return
-        ts = time.strftime("%H:%M:%S")
+        ts = time.strftime("%H:%M:S")
         full_msg = f"[{ts}] {msg}"
         self.log.config(state='normal')
         self.log.insert("end", full_msg + "\n")
@@ -502,8 +504,10 @@ class ACSSGui:
                     self.send_cmd("OVERCOOKED")
                     return
 
-                results = self.yolo.predict(
+                results = self.yolo.track(
                     source=frame,
+                    persist=True,
+                    tracker=TRACKER_PATH,
                     conf=0.3,
                     max_det=3,
                     verbose=False
@@ -525,6 +529,7 @@ class ACSSGui:
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
                         if conf > 0.3:
+                            print(f"Detected cls: {cls}, conf: {conf}")  # Log cls for debugging
                             if cls == 0:  # Raw
                                 moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
                             elif cls == 1:  # Standard
@@ -707,8 +712,8 @@ class ACSSGui:
             total_moisture = sum(self.moisture_sums.values())
             total_avg = (total_moisture / total_pieces) if total_pieces > 0 else 0.0
             self.total_moisture_label.config(text=f"{total_avg:.1f}%")
-            start_str = time.strftime("%H:%M:%S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
-            end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
+            start_str = time.strftime("%H:%M:S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
+            end_str = time.strftime("%H:%M:S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
             self.start_time_label.config(text=start_str)
             self.end_time_label.config(text=end_str)
             self.root.update()

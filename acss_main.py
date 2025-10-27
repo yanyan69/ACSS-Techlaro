@@ -4,14 +4,12 @@ Automated Copra Segregation System (ACSS) GUI
 - Provides a user interface for controlling and monitoring the copra segregation process.
 - Integrates with Arduino via serial for automated detection and sorting using ultrasonic sensors and servos.
 - Uses YOLO for copra classification (Raw, Standard, Overcooked) based on camera frames triggered by Arduino.
-- Displays real-time camera preview with live bounding boxes for debugging, logs (classification results, system events), and statistics.
+- Displays real-time camera preview with live bounding boxes at ~3 FPS for debugging, logs (classification results, system events), and statistics.
 - Classification only triggered by Arduino's ACK,AT_CAM (ultrasonic detection), but preview shows bounding boxes continuously.
-- About tab with project description, objectives, and team profiles; Exit tab for safe shutdown.
 
-Changes from Previous:
-- Modified camera_loop to use results[0].plot() for live bounding boxes, matching reference code.
-- Ensured classification is only sent to Arduino on ultrasonic trigger (ACK,AT_CAM).
-- Optimized frame handling to prevent performance bottlenecks while maintaining live preview.
+Changes:
+- Set YOLO_FRAME_SKIP = 5 to target ~3 FPS for bounding box updates (assuming ~15 FPS camera).
+- Adjusted camera_loop sleep to stabilize frame rate.
 """
 
 import tkinter as tk
@@ -48,17 +46,17 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (640, 480)  # Matches reference code
+CAM_PREVIEW_SIZE = (640, 480)
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
-SERIAL_BAUD = 115200  # Matches Arduino
+SERIAL_BAUD = 115200
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"
-CLASSIFICATION_TIMEOUT_S = 2.0  # Within Arduino's CLASS_WAIT_MS = 3000ms
-MAX_FRAME_AGE_S = 0.7  # For stale frame detection
-PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
-CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
-YOLO_FRAME_SKIP = 2  # Run YOLO every 2nd frame for performance
+CLASSIFICATION_TIMEOUT_S = 2.0
+MAX_FRAME_AGE_S = 0.7
+PING_INTERVAL_S = 5.0
+CLASSIFICATION_RETRIES = 2
+YOLO_FRAME_SKIP = 5  # Target ~3 FPS for bounding box updates (assuming ~15 FPS camera)
 
 # ---------------------------------------------------
 
@@ -106,7 +104,7 @@ class ACSSGui:
         self.serial_error_logged = False
         self.frame_drop_logged = False
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Arduino: L=Raw, C=Standard, R=Overcooked
+        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}
         self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
         self.stats = {
             'Raw': 0,
@@ -650,7 +648,7 @@ class ACSSGui:
                         self.frame_drop_logged = True
                 last_frame_time = current_time
 
-                # Run YOLO inference for live preview (bounding boxes always shown)
+                # Run YOLO inference for live preview (~3 FPS for bounding boxes)
                 if self.yolo and self.frame_counter % YOLO_FRAME_SKIP == 0:
                     results = self.yolo.track(
                         source=frame,
@@ -678,7 +676,7 @@ class ACSSGui:
                     fps_time = current_time
                     frame_counter = 0
 
-                time.sleep(0.01)
+                time.sleep(0.02)  # Adjusted for ~3 FPS YOLO updates
             except Exception as e:
                 self._log_message(f"Camera loop error: {e}")
                 time.sleep(0.2)

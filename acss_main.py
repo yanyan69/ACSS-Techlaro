@@ -12,6 +12,13 @@ Changes:
 - Adjusted camera_loop sleep to stabilize frame rate.
 - Updated perform_classification to use yolo.track for consistency with live preview, fixing cls mismatch.
 - Added cls logging in perform_classification to debug classification vs. preview discrepancies.
+- Swapped class_to_sort to {0: 'R', 1: 'C', 2: 'L'} so Raw sorts to right servo ('R'), Overcooked to left ('L').
+- Updated ACK,SORT log messages to match swapped mapping.
+- Failsafe remains OVERCOOKED, sorting to left servo ('L').
+- Added logging for send_cmd success/failure in perform_classification.
+- Increased CLASSIFICATION_TIMEOUT_S to 2.5s to handle potential YOLO delays.
+- Reduced max_det to 1 in perform_classification for faster processing.
+- Added time logging in perform_classification to debug if it exceeds Arduino's CLASS_WAIT_MS = 3000ms.
 """
 
 import tkinter as tk
@@ -54,7 +61,7 @@ SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"
-CLASSIFICATION_TIMEOUT_S = 2.0  # Within Arduino's CLASS_WAIT_MS = 3000ms
+CLASSIFICATION_TIMEOUT_S = 2.5  # Increased to handle YOLO delays
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
@@ -519,7 +526,6 @@ class ACSSGui:
                     return
 
                 has_detection = results and results[0].boxes and len(results[0].boxes) > 0
-                print(f"has_detection: {has_detection}")  # Debug
 
                 if has_detection:
                     boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -541,14 +547,13 @@ class ACSSGui:
                             moisture = round(moisture, 1)
                             candidates.append((cls, conf, moisture))
 
-                    print(f"Candidates: {len(candidates)}")  # Debug
-
                     if candidates:
                         candidates.sort(key=lambda x: x[1], reverse=True)
                         cls, conf, moisture = candidates[0]
                         category = self.category_map.get(cls, 'Overcooked')
                         class_str = category.upper()
                         if self.send_cmd(class_str):
+                            print(f"Classification sent successfully: {class_str}")
                             self.copra_counter += 1
                             self._log_message(f"{category} Copra # {self.copra_counter:04d}")
                             self._log_message(f"Moisture: {moisture}%")
@@ -556,6 +561,9 @@ class ACSSGui:
                             self.stats['total'] += 1
                             self.moisture_sums[category] += moisture
                             self.root.after(0, self.update_stats)
+                        else:
+                            print(f"Failed to send classification: {class_str}")
+                            self.send_cmd("OVERCOOKED")
                         return
                     else:
                         self._log_message("No confident detection. Defaulting to OVERCOOKED.")

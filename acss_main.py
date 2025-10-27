@@ -6,7 +6,7 @@ Automated Copra Segregation System (ACSS) GUI
 - Parses DBG,CAM_ULTRA for DETECTED, DETECTED_TIMEOUT, DETECTED_JUMP to debug camera sensor.
 - Logs ACK,SORT,L/R and ACK,MOTOR,START,2000 for sorting confirmation.
 - Ensures CLASSIFICATION_TIMEOUT_S (2.0s) aligns with Arduino's CLASS_WAIT_MS (3000ms).
-- Displays bounding boxes with tracking (bytetrack.yaml) in camera preview by default, using results[0].plot().
+- Added bounding box drawing in camera preview by default after launch.
 """
 
 import tkinter as tk
@@ -43,17 +43,17 @@ except:
     PIL_AVAILABLE = False
 
 # ------------------ USER SETTINGS ------------------
-CAM_PREVIEW_SIZE = (640, 480)  # Matches reference code
+CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
-TRACKER_PATH = "bytetrack.yaml"  # Matches reference code
+TRACKER_PATH = "bytetrack.yaml"  # For live tracking in preview
 CLASSIFICATION_TIMEOUT_S = 2.0  # Within Arduino's CLASS_WAIT_MS = 3000ms
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
-YOLO_FRAME_SKIP = 2  # Run YOLO every 2nd frame to balance performance
+YOLO_FRAME_SKIP = 2  # Run YOLO every 2nd frame for performance
 
 # ---------------------------------------------------
 
@@ -101,7 +101,7 @@ class ACSSGui:
         self.serial_error_logged = False
         self.frame_drop_logged = False
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Matches reference code
+        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Arduino maps 'C' to no servo action
         self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
         self.stats = {
             'Raw': 0,
@@ -463,6 +463,7 @@ class ACSSGui:
                     elif line == "ACK,PING":
                         print("Arduino responded to PING: Connection alive.")
                     elif line.startswith("DBG,CAM_ULTRA,DIST="):
+                        # Parse camera debug messages
                         parts = line.split(",")
                         if len(parts) >= 3:
                             if "DETECTED_TIMEOUT" in line:
@@ -481,7 +482,7 @@ class ACSSGui:
             self._log_message(f"Serial reader crashed: {outer}")
 
     def perform_classification(self):
-        """Perform YOLO detection (no tracking) and send classification to Arduino within timeout."""
+        """Perform YOLO detection and send classification to Arduino within timeout."""
         start_time = time.time()
         for attempt in range(CLASSIFICATION_RETRIES):
             try:
@@ -563,6 +564,29 @@ class ACSSGui:
                 self._log_message(f"Classification failed after retries: {e}. Defaulting to OVERCOOKED.")
                 self.send_cmd("OVERCOOKED")
                 return
+
+    def draw_bounding_boxes(self, frame, results):
+        """Draw bounding boxes, class labels, and confidences on the frame."""
+        if not results or not results[0].boxes or len(results[0].boxes) == 0:
+            return frame
+        boxes = results[0].boxes.xyxy.cpu().numpy()
+        cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
+        conf_tensor = results[0].boxes.conf.cpu().numpy()
+        for i in range(len(boxes)):
+            if conf_tensor[i] > 0.3:
+                x1, y1, x2, y2 = map(int, boxes[i])
+                cls = cls_tensor[i]
+                conf = conf_tensor[i]
+                category = self.category_map.get(cls, 'Overcooked')
+                color = {
+                    'Raw': (0, 255, 0),       # Green
+                    'Standard': (255, 255, 0), # Yellow
+                    'Overcooked': (0, 0, 255)  # Red
+                }.get(category, (0, 0, 255))
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                label = f"{category} {conf:.2f}"
+                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        return frame
 
     def start_process(self):
         try:
@@ -648,29 +672,18 @@ class ACSSGui:
                         self.frame_drop_logged = True
                 last_frame_time = current_time
 
-                # Run YOLO tracking every YOLO_FRAME_SKIP frames
+                # Run YOLO inference every YOLO_FRAME_SKIP frames
                 results = None
                 if self.yolo and self.frame_counter % YOLO_FRAME_SKIP == 0:
                     results = self.yolo.track(
                         source=frame,
                         persist=True,
                         tracker=TRACKER_PATH,
-                        conf=0.25,  # Matches reference code
-                        max_det=5,  # Matches reference code
+                        conf=0.3,
+                        max_det=3,
                         verbose=False
                     )
-                    if results and results[0].boxes and len(results[0].boxes) > 0:
-                        print(f"Detections: {len(results[0].boxes)} tracks")
-                        if results[0].boxes.id is not None:
-                            track_ids = results[0].boxes.id.cpu().numpy()
-                            print(f"Track IDs: {track_ids}")
-                    frame = results[0].plot()  # Draw boxes and track IDs
-
-                # Add FPS overlay
-                if self.frame_counter % YOLO_FRAME_SKIP == 0:
-                    fps = frame_counter / max(current_time - fps_time, 1e-6)
-                    cv2.putText(frame, f"FPS: {fps:.1f}", (10, 25),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    frame = self.draw_bounding_boxes(frame, results)
 
                 with self.frame_lock:
                     self.latest_frame = frame

@@ -17,9 +17,9 @@ Changes:
 - Increased CLASSIFICATION_TIMEOUT_S to 2.5s for more time.
 - Reduced max_det to 1 in perform_classification for faster processing.
 - Added time logging in perform_classification to debug if it exceeds Arduino's CLASS_WAIT_MS = 3000ms.
-- Swapped class_to_sort to {0: 'R', 1: 'C', 2: 'L'} so Raw sorts to right servo ('R'), Overcooked to left ('L').
-- Updated ACK,SORT log messages to match swapped mapping.
-- Failsafe remains OVERCOOKED, sorting to left servo ('L').
+- Improved serial_reader_thread to read all available lines when data is ready, fixing missed lines.
+- Set serial timeout to 1s for better reading.
+- Failsafe remains OVERCOOKED.
 """
 
 import tkinter as tk
@@ -403,7 +403,7 @@ class ACSSGui:
             if self.serial and self.serial.is_open:
                 print("Serial already open.")
                 return
-            self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
+            self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)  # Increased timeout to 1s
             self._log_message(f"Connected to Arduino on {SERIAL_PORT}@{SERIAL_BAUD}")
             self.serial_reader_thread_obj = threading.Thread(target=self.serial_reader_thread, daemon=True)
             self.serial_reader_thread_obj.start()
@@ -449,41 +449,41 @@ class ACSSGui:
         try:
             while self.serial and self.serial.is_open and self.running:
                 try:
-                    with self.serial_lock:
-                        self.serial.reset_input_buffer()
-                    line = self.serial.readline().decode(errors='ignore').strip()
-                    if not line:
-                        continue
-                    print(f"ARDUINO: {line}")
-                    if line.startswith("ACK,AT_CAM"):
-                        self.perform_classification()
-                    elif line == "TRIG,FLAP_OBJECT_DETECTED":
-                        self._log_message("Copra detected at flapper, centering for sorting.")
-                    elif line == "ERR,MOTOR_TIMEOUT":
-                        self._log_message("Error: Camera sensor missed object. Check alignment, distance (<10cm), or jump (>27cm).")
-                    elif line.startswith("ERR,FIFO_FULL"):
-                        self._log_message("Error: Arduino queue full. Resetting system.")
-                        self._reset_stats()
-                    elif line.startswith("ACK,CLASS,"):
-                        self._log_message(f"Arduino confirmed classification: {line.split(',')[-1]}")
-                    elif line == "ACK,SORT,L":
-                        self._log_message("Sorted Overcooked (left servo).")
-                    elif line == "ACK,SORT,R":
-                        self._log_message("Sorted Raw (right servo).")
-                    elif line == "ACK,MOTOR,START,2000":
-                        self._log_message("Moving Standard copra (conveyor).")
-                    elif line == "ACK,PING":
-                        print("Arduino responded to PING: Connection alive.")
-                    elif line.startswith("DBG,CAM_ULTRA,DIST="):
-                        parts = line.split(",")
-                        if len(parts) >= 3:
-                            if "DETECTED_TIMEOUT" in line:
-                                self._log_message("Camera sensor: Timeout detection (999cm).", console_only=True)
-                            elif "DETECTED_JUMP" in line:
-                                prev_dist = parts[-1].split("=")[1] if "=" in parts[-1] else "N/A"
-                                self._log_message(f"Camera sensor: Distance jump detected (prev={prev_dist}cm).", console_only=True)
-                            elif "DETECTED" in line:
-                                self._log_message("Camera sensor: Close object detected (<10cm).", console_only=True)
+                    # Read all available lines
+                    while self.serial.in_waiting > 0:
+                        line = self.serial.readline().decode(errors='ignore').strip()
+                        if line:
+                            print(f"ARDUINO: {line}")
+                            if line.startswith("ACK,AT_CAM"):
+                                self.perform_classification()
+                            elif line == "TRIG,FLAP_OBJECT_DETECTED":
+                                self._log_message("Copra detected at flapper, centering for sorting.")
+                            elif line == "ERR,MOTOR_TIMEOUT":
+                                self._log_message("Error: Camera sensor missed object. Check alignment, distance (<10cm), or jump (>27cm).")
+                            elif line.startswith("ERR,FIFO_FULL"):
+                                self._log_message("Error: Arduino queue full. Resetting system.")
+                                self._reset_stats()
+                            elif line.startswith("ACK,CLASS,"):
+                                self._log_message(f"Arduino confirmed classification: {line.split(',')[-1]}")
+                            elif line == "ACK,SORT,L":
+                                self._log_message("Sorted Overcooked (left servo).")
+                            elif line == "ACK,SORT,R":
+                                self._log_message("Sorted Raw (right servo).")
+                            elif line == "ACK,MOTOR,START,2000":
+                                self._log_message("Moving Standard copra (conveyor).")
+                            elif line == "ACK,PING":
+                                print("Arduino responded to PING: Connection alive.")
+                            elif line.startswith("DBG,CAM_ULTRA,DIST="):
+                                parts = line.split(",")
+                                if len(parts) >= 3:
+                                    if "DETECTED_TIMEOUT" in line:
+                                        self._log_message("Camera sensor: Timeout detection (999cm).", console_only=True)
+                                    elif "DETECTED_JUMP" in line:
+                                        prev_dist = parts[-1].split("=")[1] if "=" in parts[-1] else "N/A"
+                                        self._log_message(f"Camera sensor: Distance jump detected (prev={prev_dist}cm).", console_only=True)
+                                    elif "DETECTED" in line:
+                                        self._log_message("Camera sensor: Close object detected (<10cm).", console_only=True)
+                    time.sleep(0.01)  # Small sleep to avoid CPU spin
                 except Exception as e:
                     if not self.serial_error_logged:
                         self._log_message(f"Serial reader error: {e}")
@@ -554,7 +554,6 @@ class ACSSGui:
                         cls, conf, moisture = candidates[0]
                         category = self.category_map.get(cls, 'Overcooked')
                         class_str = category.upper()
-                        print(f"Attempting to send classification: {class_str}")
                         success = self.send_cmd(class_str)
                         print(f"Send success: {success}")
                         if success:

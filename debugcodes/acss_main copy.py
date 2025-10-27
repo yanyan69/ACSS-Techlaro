@@ -1,12 +1,31 @@
 #!/usr/bin/env python3
 """
 Automated Copra Segregation System (ACSS) GUI
-- Aligned with Arduino code including 500ms flapper delay (FLAP_CENTER_DELAY_MS) for centering copra.
-- Logs TRIG,FLAP_OBJECT_DETECTED to confirm flapper detection.
-- Parses DBG,CAM_ULTRA for DETECTED, DETECTED_TIMEOUT, DETECTED_JUMP to debug camera sensor.
-- Logs ACK,SORT,L/R and ACK,MOTOR,START,2000 for sorting confirmation.
-- Ensures CLASSIFICATION_TIMEOUT_S (2.0s) aligns with Arduino's CLASS_WAIT_MS (3000ms).
-- Handles ERR,MOTOR_TIMEOUT with specific camera sensor guidance.
+- Provides a user interface for controlling and monitoring the copra segregation process.
+- Integrates with Arduino via serial for automated detection and sorting using ultrasonic sensors and servos.
+- Uses YOLO for copra classification (Raw, Standard, Overcooked) based on camera frames triggered by Arduino.
+- Displays real-time camera preview, logs (classification results, system events), and statistics.
+- About tab with project description, objectives, and team profiles.
+- Exit tab for safe shutdown.
+- Arduino logs (ACK, TRIG, ERR, DBG) are shown in terminal only; GUI log shows classification and system events.
+
+Expected Functionalities:
+- Home Tab: Start/Stop process, camera preview, log display with classification results and system events.
+- Statistics Tab: Tracks processed copra, average moisture, total counts, timestamps.
+- About Tab: Project info, objectives, team profiles with images; scrollable; min/max button.
+- Exit Tab: Graceful exit with confirmation, stopping processes and closing serial/camera.
+- Serial Interaction: Sends AUTO_ENABLE/DISABLE, RESET, classifications; receives ACK,AT_CAM, TRIG, ERR, DBG.
+- Moisture Estimation: Based on YOLO confidence (Raw: 7.1-60%, Standard: 6-7%, Overcooked: 4-5.9%).
+
+Setup Instructions:
+1. Install dependencies: pip install pyserial opencv-python numpy picamera2 ultralytics pillow
+2. Connect Arduino to Raspberry Pi via USB (ensure SERIAL_PORT matches, e.g., /dev/ttyUSB0).
+3. Place YOLO model file at YOLO_MODEL_PATH (train or download a copra-specific model).
+4. Place team profile images in resources/profiles/ (christian.png, marielle.png, jerald.png, johnpaul.png).
+5. Run on Raspberry Pi with camera module enabled (raspi-config > Interface > Camera > Enable).
+6. Adjust SERIAL_PORT and YOLO_MODEL_PATH if needed.
+7. Start the script: python3 this_script.py
+- Note: Runs in full-screen (1024x600); use About tab button to minimize/maximize.
 """
 
 import tkinter as tk
@@ -48,10 +67,8 @@ USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"  # Using yolov11n.pt
-CLASSIFICATION_TIMEOUT_S = 2.0  # Within Arduino's CLASS_WAIT_MS = 3000ms
-MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
-PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
-CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
+CLASSIFICATION_TIMEOUT_S = 2.5  # Within Arduino's CLASS_WAIT_MS = 3000ms
+MAX_FRAME_AGE_S = 0.5  # Max age of frame for classification
 
 # ---------------------------------------------------
 
@@ -89,7 +106,6 @@ class ACSSGui:
         self.serial_lock = threading.Lock()
         self.running = True
         self.camera_thread = None
-        self.ping_thread = None
         self.picam2 = None
         self.yolo = None
         self.frame_lock = threading.Lock()
@@ -99,7 +115,7 @@ class ACSSGui:
         self.serial_error_logged = False
         self.frame_drop_logged = False
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Arduino maps 'C' to no servo action
+        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Note: Arduino maps 'C' to no servo action
         self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
         self.stats = {
             'Raw': 0,
@@ -110,7 +126,6 @@ class ACSSGui:
             'end_time': None
         }
         self.copra_counter = 0
-        self.last_ping_time = 0
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -391,9 +406,7 @@ class ACSSGui:
             self._log_message(f"Connected to Arduino on {SERIAL_PORT}@{SERIAL_BAUD}")
             self.serial_reader_thread_obj = threading.Thread(target=self.serial_reader_thread, daemon=True)
             self.serial_reader_thread_obj.start()
-            self.ping_thread = threading.Thread(target=self.ping_loop, daemon=True)
-            self.ping_thread.start()
-            print("Serial reader and ping threads started.")
+            print("Serial reader thread started.")
         except Exception as e:
             self._log_message(f"Failed to connect to Arduino: {e}")
 
@@ -410,66 +423,29 @@ class ACSSGui:
         try:
             if not self.serial or not self.serial.is_open:
                 self._log_message(f"Serial not open — can't send: {text}")
-                return False
+                return
             full_cmd = (text.strip().upper() + "\n").encode('utf-8')
             with self.serial_lock:
                 self.serial.write(full_cmd)
                 self.serial.flush()
             print(f"Sent to Arduino: {text}")
-            return True
         except Exception as e:
             self._log_message(f"Failed to send command '{text}': {e}")
-            return False
-
-    def ping_loop(self):
-        """Send periodic PING commands to ensure Arduino connection."""
-        while self.running and self.serial and self.serial.is_open:
-            if time.time() - self.last_ping_time >= PING_INTERVAL_S:
-                self.send_cmd("PING")
-                self.last_ping_time = time.time()
-            time.sleep(0.5)
 
     def serial_reader_thread(self):
         print("Serial reader started.")
         try:
             while self.serial and self.serial.is_open and self.running:
                 try:
-                    with self.serial_lock:
-                        self.serial.reset_input_buffer()  # Clear stale data
                     line = self.serial.readline().decode(errors='ignore').strip()
                     if not line:
                         continue
+                    # Log all Arduino messages to console only
                     print(f"ARDUINO: {line}")
                     if line.startswith("ACK,AT_CAM"):
                         self.perform_classification()
-                    elif line == "TRIG,FLAP_OBJECT_DETECTED":
-                        self._log_message("Copra detected at flapper, centering for sorting.")
                     elif line == "ERR,MOTOR_TIMEOUT":
-                        self._log_message("Error: Camera sensor missed object. Check alignment, distance (<10cm), or jump (>27cm).")
-                    elif line.startswith("ERR,FIFO_FULL"):
-                        self._log_message("Error: Arduino queue full. Resetting system.")
-                        self._reset_stats()
-                    elif line.startswith("ACK,CLASS,"):
-                        self._log_message(f"Arduino confirmed classification: {line.split(',')[-1]}")
-                    elif line == "ACK,SORT,L":
-                        self._log_message("Sorted Overcooked (left servo).")
-                    elif line == "ACK,SORT,R":
-                        self._log_message("Sorted Raw (right servo).")
-                    elif line == "ACK,MOTOR,START,2000":
-                        self._log_message("Moving Standard copra (conveyor).")
-                    elif line == "ACK,PING":
-                        print("Arduino responded to PING: Connection alive.")
-                    elif line.startswith("DBG,CAM_ULTRA,DIST="):
-                        # Parse camera debug messages
-                        parts = line.split(",")
-                        if len(parts) >= 3:
-                            if "DETECTED_TIMEOUT" in line:
-                                self._log_message("Camera sensor: Timeout detection (999cm).", console_only=True)
-                            elif "DETECTED_JUMP" in line:
-                                prev_dist = parts[-1].split("=")[1] if "=" in parts[-1] else "N/A"
-                                self._log_message(f"Camera sensor: Distance jump detected (prev={prev_dist}cm).", console_only=True)
-                            elif "DETECTED" in line:
-                                self._log_message("Camera sensor: Close object detected (<10cm).", console_only=True)
+                        print("Error: Object missed camera sensor. Check sensor alignment or conveyor timing.")
                 except Exception as e:
                     if not self.serial_error_logged:
                         self._log_message(f"Serial reader error: {e}")
@@ -481,86 +457,68 @@ class ACSSGui:
     def perform_classification(self):
         """Perform YOLO detection and send classification to Arduino within timeout."""
         start_time = time.time()
-        for attempt in range(CLASSIFICATION_RETRIES):
-            try:
-                with self.frame_lock:
-                    if self.latest_frame is None or (time.time() - self.latest_frame_time) > MAX_FRAME_AGE_S:
-                        if attempt < CLASSIFICATION_RETRIES - 1:
-                            print(f"Stale frame on attempt {attempt + 1}, retrying...")
-                            time.sleep(0.1)
-                            continue
-                        self._log_message("No recent frame available after retries. Defaulting to OVERCOOKED.")
-                        self.send_cmd("OVERCOOKED")
-                        return
-                    frame = self.latest_frame.copy()
-
-                if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
-                    self._log_message("Classification timeout: Frame capture too slow. Defaulting to OVERCOOKED.")
-                    self.send_cmd("OVERCOOKED")
+        try:
+            with self.frame_lock:
+                if self.latest_frame is None or (time.time() - self.latest_frame_time) > MAX_FRAME_AGE_S:
+                    self._log_message("No recent frame available for classification.")
                     return
+                frame = self.latest_frame.copy()
 
-                results = self.yolo.predict(
-                    source=frame,
-                    conf=0.3,
-                    max_det=3,
-                    verbose=False
-                )
+            if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
+                self._log_message("Classification timeout: Frame capture too slow.")
+                return
 
-                if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
-                    self._log_message("Classification timeout: YOLO prediction too slow. Defaulting to OVERCOOKED.")
-                    self.send_cmd("OVERCOOKED")
-                    return
+            results = self.yolo.predict(
+                source=frame,
+                conf=0.3,
+                max_det=3,
+                verbose=False
+            )
 
-                has_detection = results and results[0].boxes and len(results[0].boxes) > 0
+            if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
+                self._log_message("Classification timeout: YOLO prediction too slow.")
+                return
 
-                if has_detection:
-                    boxes = results[0].boxes.xyxy.cpu().numpy()
-                    cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
-                    conf_tensor = results[0].boxes.conf.cpu().numpy()
-                    candidates = []
-                    for i in range(len(cls_tensor)):
-                        cls = cls_tensor[i]
-                        conf = conf_tensor[i]
-                        if conf > 0.3:
-                            if cls == 0:  # Raw
-                                moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
-                            elif cls == 1:  # Standard
-                                moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
-                            else:  # Overcooked or unknown
-                                cls = 2
-                                moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
-                            moisture = round(moisture, 1)
-                            candidates.append((cls, conf, moisture))
+            has_detection = results and results[0].boxes and len(results[0].boxes) > 0
 
-                    if candidates:
-                        candidates.sort(key=lambda x: x[1], reverse=True)
-                        cls, conf, moisture = candidates[0]
-                        category = self.category_map.get(cls, 'Overcooked')
-                        class_str = category.upper()
-                        if self.send_cmd(class_str):
-                            self.copra_counter += 1
-                            self._log_message(f"{category} Copra # {self.copra_counter:04d}")
-                            self._log_message(f"Moisture: {moisture}%")
-                            self.stats[category] += 1
-                            self.stats['total'] += 1
-                            self.moisture_sums[category] += moisture
-                            self.root.after(0, self.update_stats)
-                        return
-                    else:
-                        self._log_message("No confident detection. Defaulting to OVERCOOKED.")
-                        self.send_cmd("OVERCOOKED")
+            if has_detection:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
+                conf_tensor = results[0].boxes.conf.cpu().numpy()
+                candidates = []
+                for i in range(len(cls_tensor)):
+                    cls = cls_tensor[i]
+                    conf = conf_tensor[i]
+                    if conf > 0.3:
+                        if cls == 0:  # Raw
+                            moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
+                        elif cls == 1:  # Standard
+                            moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
+                        else:  # Overcooked or unknown
+                            cls = 2
+                            moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
+                        moisture = round(moisture, 1)
+                        candidates.append((cls, conf, moisture))
+
+                if candidates:
+                    candidates.sort(key=lambda x: x[1], reverse=True)
+                    cls, conf, moisture = candidates[0]
+                    category = self.category_map.get(cls, 'Overcooked')
+                    class_str = category.upper()
+                    self.send_cmd(class_str)
+                    self.copra_counter += 1
+                    self._log_message(f"{category} Copra # {self.copra_counter:04d}")
+                    self._log_message(f"Moisture: {moisture}%")
+                    self.stats[category] += 1
+                    self.stats['total'] += 1
+                    self.moisture_sums[category] += moisture
+                    self.root.after(0, self.update_stats)
                 else:
-                    self._log_message("No objects detected by YOLO. Defaulting to OVERCOOKED.")
-                    self.send_cmd("OVERCOOKED")
-                return
-            except Exception as e:
-                if attempt < CLASSIFICATION_RETRIES - 1:
-                    print(f"Classification error on attempt {attempt + 1}: {e}, retrying...")
-                    time.sleep(0.1)
-                    continue
-                self._log_message(f"Classification failed after retries: {e}. Defaulting to OVERCOOKED.")
-                self.send_cmd("OVERCOOKED")
-                return
+                    self._log_message("No confident detection; no classification sent.")
+            else:
+                self._log_message("No objects detected by YOLO.")
+        except Exception as e:
+            self._log_message(f"Classification error: {e}")
 
     def start_process(self):
         try:
@@ -575,7 +533,6 @@ class ACSSGui:
             self.stats['end_time'] = None
             self.serial_error_logged = False
             self.frame_drop_logged = False
-            self.last_ping_time = time.time()
             self._log_message("Process started: Auto mode enabled.")
         except Exception as e:
             self._log_message(f"Start process error: {e}")

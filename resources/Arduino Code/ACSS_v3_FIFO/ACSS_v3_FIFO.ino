@@ -6,6 +6,11 @@
   - Falls back to OVERCOOKED if no classification at flapper.
   - AS7263 (NIR sensor) functionality disabled.
   - Debug distance messages only printed when object detected for start/flapper, always for camera in MOVING_TO_FLAPPER.
+  - Added PING command to confirm serial connection with RPi.
+  - Fixed conveyor movement: no movement after servo for RAW/OVERCOOKED; only for STANDARD with adjustable CLEAR_TIME_MS.
+  - Updated ultrasonic detection: treats 999 cm (timeout) as valid object detection for all sensors.
+  - Added camera sensor condition: detects if distance increases by > 27 cm from previous reading.
+  - Added 500ms delay before stopping conveyor after flapper detection to center copra.
 */
 
 #include <Servo.h>
@@ -21,8 +26,9 @@
 const int MOTOR_SPEED = 255;
 const unsigned long TIME_TO_CAM_MS = 5000; // Increased to 5s for slower conveyors
 const unsigned long TIME_TO_FLAPPER_MS = 10750; // Camera → flapper
-const unsigned long CLEAR_TIME_MS = 2000; // Ensure object clears flapper
+const unsigned long CLEAR_TIME_MS = 2000; // Adjust here for STANDARD copra clearing duration
 const unsigned long CLASS_WAIT_MS = 3000; // Wait at camera for classification
+const unsigned long FLAP_CENTER_DELAY_MS = 500; // Delay before stopping motor at flapper to center copra
 
 #define LEFT_SERVO_PIN 5
 #define RIGHT_SERVO_PIN 13
@@ -35,20 +41,21 @@ const unsigned long SERVO_PUSH_HOLD_MS = 1000; // Stronger push
 
 #define START_ULTRA_TRIG 3
 #define START_ULTRA_ECHO 14
-const int START_DETECT_DISTANCE_CM = 8;
-const unsigned long DETECT_COOLDOWN_MS = 500;
+const int START_DETECT_DISTANCE_CM = 10;
+const unsigned long DETECT_COOLDOWN_MS = 1000;
 const unsigned long ULTRA_CHECK_INTERVAL_MS = 100;
 
 #define CAM_ULTRA_TRIG 11
 #define CAM_ULTRA_ECHO 15  // A1
 const int CAM_DETECT_DISTANCE_CM = 10; // Increased for better detection
-const unsigned long CAM_DETECT_COOLDOWN_MS = 500;
+const unsigned long CAM_DETECT_COOLDOWN_MS = 1000;
 const unsigned long CAM_ULTRA_CHECK_INTERVAL_MS = 100;
+const float CAM_DISTANCE_JUMP_CM = 27.0; // Detect if distance increases by > 27 cm
 
 #define FLAP_ULTRA_TRIG 10
 #define FLAP_ULTRA_ECHO 2
-const int FLAP_DETECT_DISTANCE_CM = 5;
-const unsigned long FLAP_DETECT_COOLDOWN_MS = 2000; // Prevent multiple triggers
+const int FLAP_DETECT_DISTANCE_CM = 6;
+const unsigned long FLAP_DETECT_COOLDOWN_MS = 1000; // Prevent multiple triggers
 const unsigned long FLAP_ULTRA_CHECK_INTERVAL_MS = 100;
 
 #define LED_PIN 4
@@ -88,6 +95,7 @@ unsigned long lastFlapUltraCheck = 0;
 
 unsigned long classWaitStart = 0;
 
+float prevCamDist = 999.0; // Track previous camera sensor distance
 String copraClass = "";
 bool autoEnabled = true;
 
@@ -176,9 +184,7 @@ void assignClassificationToEarliestAtCam(String cls) {
     int idx = (headIndex + i) % MAX_QUEUE;
     if (fifoQueue[idx].valid && fifoQueue[idx].atCamNotified && fifoQueue[idx].classification == "") {
       fifoQueue[idx].classification = cls;
-      Serial.print("ACK,ASSIGN_CLASS,idx=");
-      Serial.print(idx);
-      Serial.print(",");
+      Serial.print("ACK,CLASS,");
       Serial.println(cls);
       return;
     }
@@ -321,7 +327,7 @@ void updateServo() {
     }
     isServoActive = false;
     activeServo = 'N';
-    startMotorMove(CLEAR_TIME_MS);
+    // Removed startMotorMove(CLEAR_TIME_MS) to prevent conveyor movement after servo
   }
 }
 
@@ -334,7 +340,7 @@ float getDistanceCM(int trigPin, int echoPin) {
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
   long duration = pulseIn(echoPin, HIGH, 30000);
-  if (duration == 0) return 999;
+  if (duration == 0) return 999.0;
   return duration * 0.034 / 2.0;
 }
 
@@ -344,10 +350,10 @@ void checkStartUltrasonicTrigger() {
   lastStartUltraCheck = now;
 
   float dist = getDistanceCM(START_ULTRA_TRIG, START_ULTRA_ECHO);
-  if (autoEnabled && dist > 0 && dist < START_DETECT_DISTANCE_CM && (now - lastStartDetectTime > DETECT_COOLDOWN_MS)) {
+  if (autoEnabled && (dist == 999.0 || dist > 0 && dist < START_DETECT_DISTANCE_CM) && (now - lastStartDetectTime > DETECT_COOLDOWN_MS)) {
     Serial.print("DBG,START_ULTRA,DIST=");
     Serial.print(dist);
-    Serial.println(",DETECTED");
+    Serial.println(dist == 999.0 ? ",DETECTED_TIMEOUT" : ",DETECTED");
     lastStartDetectTime = now;
     Serial.println("TRIG,START_OBJECT_DETECTED");
     enqueuePlaceholder(now);
@@ -365,14 +371,26 @@ void checkCamUltrasonicTrigger() {
   lastCamUltraCheck = now;
 
   float dist = getDistanceCM(CAM_ULTRA_TRIG, CAM_ULTRA_ECHO);
+  bool isJump = (dist != 999.0 && prevCamDist != 999.0 && dist - prevCamDist > CAM_DISTANCE_JUMP_CM);
+
   if (currentState == MOVING_TO_FLAPPER) {
     Serial.print("DBG,CAM_ULTRA,DIST=");
-    Serial.println(dist); // Log all distances during MOVING_TO_FLAPPER
+    Serial.print(dist);
+    Serial.print(",PREV=");
+    Serial.println(prevCamDist);
   }
-  if (dist > 0 && dist < CAM_DETECT_DISTANCE_CM && (now - lastCamDetectTime > CAM_DETECT_COOLDOWN_MS)) {
+
+  if ((dist == 999.0 || dist > 0 && dist < CAM_DETECT_DISTANCE_CM || isJump) && (now - lastCamDetectTime > CAM_DETECT_COOLDOWN_MS)) {
     Serial.print("DBG,CAM_ULTRA,DIST=");
     Serial.print(dist);
-    Serial.println(",DETECTED");
+    if (dist == 999.0) {
+      Serial.println(",DETECTED_TIMEOUT");
+    } else if (isJump) {
+      Serial.print(",DETECTED_JUMP,PREV=");
+      Serial.println(prevCamDist);
+    } else {
+      Serial.println(",DETECTED");
+    }
     lastCamDetectTime = now;
     Serial.println("TRIG,CAM_OBJECT_DETECTED");
     stopMotor();
@@ -389,6 +407,7 @@ void checkCamUltrasonicTrigger() {
       }
     }
   }
+  prevCamDist = dist; // Update previous distance
 }
 
 void checkFlapUltrasonicTrigger() {
@@ -397,12 +416,13 @@ void checkFlapUltrasonicTrigger() {
   lastFlapUltraCheck = now;
 
   float dist = getDistanceCM(FLAP_ULTRA_TRIG, FLAP_ULTRA_ECHO);
-  if (dist > 0 && dist < FLAP_DETECT_DISTANCE_CM && (now - lastFlapDetectTime > FLAP_DETECT_COOLDOWN_MS)) {
+  if ((dist == 999.0 || dist > 0 && dist < FLAP_DETECT_DISTANCE_CM) && (now - lastFlapDetectTime > FLAP_DETECT_COOLDOWN_MS)) {
     Serial.print("DBG,FLAP_ULTRA,DIST=");
     Serial.print(dist);
-    Serial.println(",DETECTED");
+    Serial.println(dist == 999.0 ? ",DETECTED_TIMEOUT" : ",DETECTED");
     lastFlapDetectTime = now;
     Serial.println("TRIG,FLAP_OBJECT_DETECTED");
+    delay(FLAP_CENTER_DELAY_MS); // Delay to center copra
     stopMotor();
     currentState = AT_FLAPPER;
 
@@ -456,6 +476,8 @@ void handleCommand(String cmd) {
     lastFlapDetectTime = 0;
     clearQueue();
     Serial.println("ACK,RESET");
+  } else if (cmd == "PING") {
+    Serial.println("ACK,PING");
   } else if (cmd == "OVERCOOKED" || cmd == "RAW" || cmd == "STANDARD") {
     Serial.print("DBG,RPI_CLASS_RECEIVED,");
     Serial.println(cmd);

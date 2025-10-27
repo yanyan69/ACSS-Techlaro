@@ -19,6 +19,7 @@ Changes:
 - Added time logging in perform_classification to debug if it exceeds Arduino's CLASS_WAIT_MS = 3000ms.
 - Improved serial_reader_thread to read all available lines when data is ready, fixing missed lines.
 - Set serial timeout to 1s for better reading.
+- Updated category_map to match model classes: {0: 'Overcooked', 1: 'Raw', 2: 'Standard'}
 - Failsafe remains OVERCOOKED.
 """
 
@@ -62,7 +63,7 @@ SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"
-CLASSIFICATION_TIMEOUT_S = 2.5  # Increased to handle YOLO delays
+CLASSIFICATION_TIMEOUT_S = 2.5  # Within Arduino's CLASS_WAIT_MS = 3000ms
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
@@ -114,8 +115,8 @@ class ACSSGui:
         self.serial_error_logged = False
         self.frame_drop_logged = False
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'R', 1: 'C', 2: 'L'}  # Raw to 'R' (right), Standard to 'C', Overcooked to 'L' (left)
-        self.category_map = {0: 'Raw', 1: 'Standard', 2: 'Overcooked'}
+        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Arduino maps 'C' to no servo action
+        self.category_map = {0: 'Overcooked', 1: 'Raw', 2: 'Standard'}  # Swapped to match model classes
         self.stats = {
             'Raw': 0,
             'Standard': 0,
@@ -554,6 +555,7 @@ class ACSSGui:
                         cls, conf, moisture = candidates[0]
                         category = self.category_map.get(cls, 'Overcooked')
                         class_str = category.upper()
+                        print(f"Attempting to send classification: {class_str}")
                         success = self.send_cmd(class_str)
                         print(f"Send success: {success}")
                         if success:

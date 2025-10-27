@@ -12,13 +12,12 @@ Changes:
 - Adjusted camera_loop sleep to stabilize frame rate.
 - Updated perform_classification to use yolo.track for consistency with live preview, fixing cls mismatch.
 - Added cls logging in perform_classification to debug classification vs. preview discrepancies.
-- Swapped class_to_sort to {0: 'R', 1: 'C', 2: 'L'} so Raw sorts to right servo ('R'), Overcooked to left ('L').
-- Updated ACK,SORT log messages to match swapped mapping.
-- Failsafe remains OVERCOOKED, sorting to left servo ('L').
+- Reduced conf to 0.25 in perform_classification to increase detection chance.
 - Added logging for send_cmd success/failure in perform_classification.
-- Increased CLASSIFICATION_TIMEOUT_S to 2.5s to handle potential YOLO delays.
+- Increased CLASSIFICATION_TIMEOUT_S to 2.5s for more time.
 - Reduced max_det to 1 in perform_classification for faster processing.
 - Added time logging in perform_classification to debug if it exceeds Arduino's CLASS_WAIT_MS = 3000ms.
+- Failsafe remains OVERCOOKED, sorting to left servo ('L').
 """
 
 import tkinter as tk
@@ -515,10 +514,11 @@ class ACSSGui:
                     source=frame,
                     persist=True,
                     tracker=TRACKER_PATH,
-                    conf=0.3,
-                    max_det=3,
+                    conf=0.25,  # Reduced to increase detection chance
+                    max_det=1,  # Reduced to 1 for faster processing
                     verbose=False
                 )
+                print(f"Classification time after predict: {time.time() - start_time:.2f}s")  # Log time
 
                 if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
                     self._log_message("Classification timeout: YOLO prediction too slow. Defaulting to OVERCOOKED.")
@@ -535,15 +535,15 @@ class ACSSGui:
                     for i in range(len(cls_tensor)):
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
-                        if conf > 0.3:
+                        if conf > 0.25:
                             print(f"Detected cls: {cls}, conf: {conf}")  # Log cls for debugging
                             if cls == 0:  # Raw
-                                moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
+                                moisture = 7.1 + (conf - 0.25) * (60.0 - 7.1) / 0.75
                             elif cls == 1:  # Standard
-                                moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
+                                moisture = 6.0 + (conf - 0.25) * (7.0 - 6.0) / 0.75
                             else:  # Overcooked or unknown
                                 cls = 2
-                                moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
+                                moisture = 4.0 + (conf - 0.25) * (5.9 - 4.0) / 0.75
                             moisture = round(moisture, 1)
                             candidates.append((cls, conf, moisture))
 
@@ -552,8 +552,9 @@ class ACSSGui:
                         cls, conf, moisture = candidates[0]
                         category = self.category_map.get(cls, 'Overcooked')
                         class_str = category.upper()
-                        if self.send_cmd(class_str):
-                            print(f"Classification sent successfully: {class_str}")
+                        success = self.send_cmd(class_str)
+                        print(f"Send success: {success}")
+                        if success:
                             self.copra_counter += 1
                             self._log_message(f"{category} Copra # {self.copra_counter:04d}")
                             self._log_message(f"Moisture: {moisture}%")
@@ -562,7 +563,7 @@ class ACSSGui:
                             self.moisture_sums[category] += moisture
                             self.root.after(0, self.update_stats)
                         else:
-                            print(f"Failed to send classification: {class_str}")
+                            self._log_message("Send failed. Defaulting to OVERCOOKED.")
                             self.send_cmd("OVERCOOKED")
                         return
                     else:

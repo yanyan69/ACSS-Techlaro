@@ -17,6 +17,8 @@ Changes:
 - Increased CLASSIFICATION_TIMEOUT_S to 2.5s for more time.
 - Reduced max_det to 1 in perform_classification for faster processing.
 - Added time logging in perform_classification to debug if it exceeds Arduino's CLASS_WAIT_MS = 3000ms.
+- Swapped class_to_sort to {0: 'R', 1: 'C', 2: 'L'} so Raw sorts to right servo ('R'), Overcooked to left ('L').
+- Updated ACK,SORT log messages to match swapped mapping.
 - Failsafe remains OVERCOOKED, sorting to left servo ('L').
 """
 
@@ -552,6 +554,7 @@ class ACSSGui:
                         cls, conf, moisture = candidates[0]
                         category = self.category_map.get(cls, 'Overcooked')
                         class_str = category.upper()
+                        print(f"Attempting to send classification: {class_str}")
                         success = self.send_cmd(class_str)
                         print(f"Send success: {success}")
                         if success:

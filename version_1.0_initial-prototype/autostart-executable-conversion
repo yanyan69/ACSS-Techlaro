@@ -12,7 +12,7 @@ After=graphical.target
 User=admin
 WorkingDirectory=/home/admin/project/ACSS-Techlaro
 ExecStart=/home/admin/project/ACSS-Techlaro/venv/bin/python3 /home/admin/project/ACSS-Techlaro/acss_main.py
-Restart=always
+Restart=on-failure
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/admin/.Xauthority
 

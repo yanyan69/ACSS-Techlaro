@@ -51,7 +51,7 @@ try:
 except:
     ULTRALYTICS_AVAILABLE = False
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageResampling  # Update on November 05, 2025: Added ImageResampling import for compatibility with newer PIL versions.
     PIL_AVAILABLE = True
 except:
     PIL_AVAILABLE = False
@@ -115,8 +115,7 @@ class ACSSGui:
         self.serial_error_logged = False
         self.frame_drop_logged = False
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Arduino maps 'C' to no servo action
-        self.category_map = {0: 'Overcooked', 1: 'Raw', 2: 'Standard'}  # Swapped to match model classes
+        self.category_map = {0: 'Overcooked', 1: 'Raw', 2: 'Standard'}  # Updated to match yolov11n model classes: {0: 'overcooked-copra', 1: 'raw-copra', 2: 'standard-copra'}
         self.stats = {
             'Raw': 0,
             'Standard': 0,
@@ -325,7 +324,7 @@ class ACSSGui:
 
         try:
             img = Image.open("resources/profiles/acss-3d.png")
-            img = img.resize((200, 200), Image.LANCZOS)
+            img = img.resize((200, 200), Image.Resampling.LANCZOS)  # Update on November 05, 2025: Replaced Image.LANCZOS with Image.Resampling.LANCZOS for compatibility with newer PIL versions.
             photo = ImageTk.PhotoImage(img)
             img_label = tk.Label(about_frame, image=photo)
             img_label.image = photo
@@ -364,7 +363,7 @@ class ACSSGui:
 
             try:
                 img = Image.open(f"resources/profiles/{img_path}")
-                img = img.resize((100, 100), Image.LANCZOS)
+                img = img.resize((100, 100), Image.Resampling.LANCZOS)  # Update on November 05, 2025: Replaced Image.LANCZOS with Image.Resampling.LANCZOS for compatibility with newer PIL versions.
                 photo = ImageTk.PhotoImage(img)
                 img_label = tk.Label(member_frame, image=photo)
                 img_label.image = photo
@@ -394,7 +393,8 @@ class ACSSGui:
             self.stop_process()
             self.stop_camera()
             self.close_serial()
-            self.on_close()
+            self._log_message("Application closed.")
+            self.root.destroy()
 
     def open_serial(self):
         try:
@@ -456,7 +456,14 @@ class ACSSGui:
                         if line:
                             print(f"ARDUINO: {line}")
                             if line.startswith("ACK,AT_CAM"):
-                                self.perform_classification()
+                                # Update on November 05, 2025: Parse ID from "ACK,AT_CAM,idx=X,id=Y" and pass to perform_classification for syncing.
+                                parts = line.split(',')
+                                id = None
+                                for part in parts:
+                                    if 'id=' in part:
+                                        id = int(part.split('=')[1])
+                                        break
+                                self.perform_classification(id)
                             elif line == "TRIG,FLAP_OBJECT_DETECTED":
                                 self._log_message("Copra detected at flapper, centering for sorting.")
                             elif line == "ERR,MOTOR_TIMEOUT":
@@ -493,7 +500,7 @@ class ACSSGui:
         except Exception as outer:
             self._log_message(f"Serial reader crashed: {outer}")
 
-    def perform_classification(self):
+    def perform_classification(self, id=None):  # Update on November 05, 2025: Added id parameter to support sending "CLASS,ID" for Arduino syncing.
         start_time = time.time()
         for attempt in range(CLASSIFICATION_RETRIES):
             try:
@@ -540,12 +547,11 @@ class ACSSGui:
                         conf = conf_tensor[i]
                         if conf > 0.25:
                             print(f"Detected cls: {cls}, conf: {conf}")  # Log cls for debugging
-                            if cls == 0:  # Raw
+                            if cls == 1:  # Raw: high moisture (Update on November 05, 2025: Swapped moisture ranges to match category_map {0:Overcooked/low, 1:Raw/high, 2:Standard/mid}. Removed forced cls=2 in else; unknown defaults to Overcooked.)
                                 moisture = 7.1 + (conf - 0.25) * (60.0 - 7.1) / 0.75
-                            elif cls == 1:  # Standard
+                            elif cls == 2:  # Standard: mid
                                 moisture = 6.0 + (conf - 0.25) * (7.0 - 6.0) / 0.75
-                            else:  # Overcooked or unknown
-                                cls = 2
+                            else:  # Overcooked (0 or unknown): low
                                 moisture = 4.0 + (conf - 0.25) * (5.9 - 4.0) / 0.75
                             moisture = round(moisture, 1)
                             candidates.append((cls, conf, moisture))
@@ -556,7 +562,8 @@ class ACSSGui:
                         category = self.category_map.get(cls, 'Overcooked')
                         class_str = category.upper()
                         print(f"Attempting to send classification: {class_str}")
-                        success = self.send_cmd(class_str)
+                        send_text = f"{class_str},{id if id is not None else 0}"  # Update on November 05, 2025: Send "CLASS,ID" format for Arduino FIFO syncing (default ID=0 if missing).
+                        success = self.send_cmd(send_text)
                         print(f"Send success: {success}")
                         if success:
                             self.copra_counter += 1
@@ -578,6 +585,8 @@ class ACSSGui:
                     self.send_cmd("OVERCOOKED")
                 return
             except Exception as e:
+                # Update on November 05, 2025: Added try-except around YOLO inference to prevent crashes; log and continue on errors.
+                print(f"YOLO inference error: {e}")
                 if attempt < CLASSIFICATION_RETRIES - 1:
                     print(f"Classification error on attempt {attempt + 1}: {e}, retrying...")
                     time.sleep(0.1)
@@ -671,15 +680,19 @@ class ACSSGui:
 
                 # Run YOLO inference for live preview (~3 FPS for bounding boxes)
                 if self.yolo and self.frame_counter % YOLO_FRAME_SKIP == 0:
-                    results = self.yolo.track(
-                        source=frame,
-                        persist=True,
-                        tracker=TRACKER_PATH,
-                        conf=0.3,
-                        max_det=3,
-                        verbose=False
-                    )
-                    frame = results[0].plot()  # Use YOLO's plot() for bounding boxes
+                    try:  # Update on November 05, 2025: Added try-except around YOLO inference to prevent crashes; log and continue on errors.
+                        results = self.yolo.track(
+                            source=frame,
+                            persist=True,
+                            tracker=TRACKER_PATH,
+                            conf=0.3,
+                            max_det=3,
+                            verbose=False
+                        )
+                        frame = results[0].plot()  # Use YOLO's plot() for bounding boxes
+                    except Exception as e:
+                        print(f"YOLO inference error: {e}")
+                        continue
 
                 with self.frame_lock:
                     self.latest_frame = frame

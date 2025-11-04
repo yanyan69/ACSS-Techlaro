@@ -1,4 +1,5 @@
 /*
+  CHECKPOINT AT NOVEMBER 04 2025
   Automated Copra Segregation - Arduino Controller (Simplified FIFO Automation)
   - Fully automated sequence: start ultrasonic → camera (stop for classification) → flapper (stop for sorting).
   - Stops at camera for CLASS_WAIT_MS to wait for RPi classification, then resumes.

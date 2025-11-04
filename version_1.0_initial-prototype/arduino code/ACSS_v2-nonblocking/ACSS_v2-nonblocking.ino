@@ -18,7 +18,7 @@
 #define MOTOR_STBY 6
 
 const int MOTOR_SPEED = 255;
-const unsigned long TIME_TO_CAM_MS = 3000; // start → camera
+const unsigned long TIME_TO_CAM_MS = 3000; // start → camera (unused now, but kept for reference)
 const unsigned long TIME_TO_NIR_MS = 750;  // camera → NIR
 const unsigned long TIME_TO_FLAPPER_MS = 10000; // NIR → flapper (max window)
 const unsigned long CLEAR_TIME_MS = 1000;
@@ -40,6 +40,12 @@ const unsigned long SERVO_COOLDOWN_MS = 500;
 const int START_DETECT_DISTANCE_CM = 7;
 const unsigned long DETECT_COOLDOWN_MS = 500;
 const unsigned long ULTRA_CHECK_INTERVAL_MS = 100;
+
+#define CAM_ULTRA_TRIG 11
+#define CAM_ULTRA_ECHO 15  // A1
+const int CAM_DETECT_DISTANCE_CM = 7;
+const unsigned long CAM_DETECT_COOLDOWN_MS = 500;
+const unsigned long CAM_ULTRA_CHECK_INTERVAL_MS = 100;
 
 #define FLAP_ULTRA_TRIG 10
 #define FLAP_ULTRA_ECHO 2
@@ -78,6 +84,8 @@ char activeServo = 'N';
 
 unsigned long lastStartDetectTime = 0;
 unsigned long lastStartUltraCheck = 0;
+unsigned long lastCamDetectTime = 0;
+unsigned long lastCamUltraCheck = 0;
 unsigned long lastFlapDetectTime = 0;
 unsigned long lastFlapUltraCheck = 0;
 
@@ -98,6 +106,7 @@ struct CopraItem {
   bool atCamNotified;        // ACK,AT_CAM sent for this item
   bool nirRequested;         // NIR read has been requested for this item
   unsigned long detectedAt;  // millis when START ultrasonic detected this item
+  unsigned long camArrivedAt; // millis when CAM ultrasonic detected this item
 };
 
 CopraItem fifoQueue[MAX_QUEUE];
@@ -112,6 +121,7 @@ void clearQueue() {
     fifoQueue[i].atCamNotified = false;
     fifoQueue[i].nirRequested = false;
     fifoQueue[i].detectedAt = 0;
+    fifoQueue[i].camArrivedAt = 0;
   }
   headIndex = 0;
   tailIndex = 0;
@@ -156,6 +166,7 @@ void enqueuePlaceholder(unsigned long detectedTime) {
   fifoQueue[tailIndex].atCamNotified = false;
   fifoQueue[tailIndex].nirRequested = false;
   fifoQueue[tailIndex].detectedAt = detectedTime;
+  fifoQueue[tailIndex].camArrivedAt = 0;
   tailIndex = (tailIndex + 1) % MAX_QUEUE;
   queueCount++;
   Serial.print("ACK,ENQUEUE_PLACEHOLDER,idx=");
@@ -174,6 +185,7 @@ void assignClassificationToEarliestAtCam(String cls) {
       fifoQueue[tailIndex].atCamNotified = false;
       fifoQueue[tailIndex].nirRequested = false;
       fifoQueue[tailIndex].detectedAt = millis();
+      fifoQueue[tailIndex].camArrivedAt = 0;
       tailIndex = (tailIndex + 1) % MAX_QUEUE;
       queueCount++;
       Serial.print("ACK,ENQUEUE_DIRECT,");
@@ -204,6 +216,7 @@ void assignClassificationToEarliestAtCam(String cls) {
     fifoQueue[tailIndex].atCamNotified = false;
     fifoQueue[tailIndex].nirRequested = false;
     fifoQueue[tailIndex].detectedAt = millis();
+    fifoQueue[tailIndex].camArrivedAt = 0;
     tailIndex = (tailIndex + 1) % MAX_QUEUE;
     queueCount++;
     Serial.print("ACK,ENQUEUE_LATE,");
@@ -223,6 +236,7 @@ String dequeueItem() {
   fifoQueue[headIndex].atCamNotified = false;
   fifoQueue[headIndex].nirRequested = false;
   fifoQueue[headIndex].detectedAt = 0;
+  fifoQueue[headIndex].camArrivedAt = 0;
   headIndex = (headIndex + 1) % MAX_QUEUE;
   queueCount--;
   Serial.print("ACK,DEQUEUE,idx=");
@@ -253,6 +267,8 @@ void setup() {
 
   pinMode(START_ULTRA_TRIG, OUTPUT);
   pinMode(START_ULTRA_ECHO, INPUT);
+  pinMode(CAM_ULTRA_TRIG, OUTPUT);
+  pinMode(CAM_ULTRA_ECHO, INPUT);
   pinMode(FLAP_ULTRA_TRIG, OUTPUT);
   pinMode(FLAP_ULTRA_ECHO, INPUT);
 
@@ -386,6 +402,30 @@ void checkStartUltrasonicTrigger() {
     } else {
       // If already moving, we just keep the motor as-is (objects are in pipeline)
       // Optionally you could extend motorDuration if needed — keep simple for now
+    }
+  }
+}
+
+void checkCamUltrasonicTrigger() {
+  unsigned long now = millis();
+  if (now - lastCamUltraCheck < CAM_ULTRA_CHECK_INTERVAL_MS) return;
+  lastCamUltraCheck = now;
+
+  float dist = getDistanceCM(CAM_ULTRA_TRIG, CAM_ULTRA_ECHO);
+  if (autoMode && dist > 0 && dist < CAM_DETECT_DISTANCE_CM && (now - lastCamDetectTime > CAM_DETECT_COOLDOWN_MS)) {
+    lastCamDetectTime = now;
+    Serial.println("TRIG,CAM_OBJECT_DETECTED");
+    // Assign to earliest non-notified item
+    for (int i = 0; i < queueCount; i++) {
+      int idx = (headIndex + i) % MAX_QUEUE;
+      if (fifoQueue[idx].valid && !fifoQueue[idx].atCamNotified) {
+        fifoQueue[idx].atCamNotified = true;
+        fifoQueue[idx].camArrivedAt = now;
+        Serial.print("ACK,AT_CAM,idx=");
+        Serial.println(idx);
+        fifoQueue[idx].nirRequested = true;
+        break; // assign to one per detection (earliest)
+      }
     }
   }
 }
@@ -550,9 +590,12 @@ void handleCommand(String cmd) {
       Serial.println("Servo test done.");
     } else if (ch == 'I') {
       float startDist = getDistanceCM(START_ULTRA_TRIG, START_ULTRA_ECHO);
+      float camDist = getDistanceCM(CAM_ULTRA_TRIG, CAM_ULTRA_ECHO);
       float flapDist = getDistanceCM(FLAP_ULTRA_TRIG, FLAP_ULTRA_ECHO);
       Serial.print("Start Ultra: ");
       Serial.print(startDist);
+      Serial.print(" cm, Cam Ultra: ");
+      Serial.print(camDist);
       Serial.print(" cm, Flap Ultra: ");
       Serial.print(flapDist);
       Serial.println(" cm");
@@ -582,32 +625,15 @@ void updateStateMachine() {
     {
       unsigned long elapsed = now - motorStartTime;
 
-      // When enough time passed to reach camera: notify earliest queued item that hasn't been notified yet
-      if (elapsed >= TIME_TO_CAM_MS) {
-        for (int i = 0; i < queueCount; i++) {
-          int idx = (headIndex + i) % MAX_QUEUE;
-          if (fifoQueue[idx].valid && !fifoQueue[idx].atCamNotified) {
-            fifoQueue[idx].atCamNotified = true;
-            fifoQueue[idx].detectedAt = fifoQueue[idx].detectedAt == 0 ? now : fifoQueue[idx].detectedAt;
-            Serial.print("ACK,AT_CAM,idx=");
-            Serial.println(idx);
-            fifoQueue[idx].nirRequested = true;
-            break; // only mark one per cam event
-          }
-        }
-      }
-
-      // Handle NIR read window
-      if (elapsed >= (TIME_TO_CAM_MS + TIME_TO_NIR_MS)) {
-        for (int i = 0; i < queueCount; i++) {
-          int idx = (headIndex + i) % MAX_QUEUE;
-          if (fifoQueue[idx].valid && fifoQueue[idx].nirRequested) {
-            Serial.print("ACK,AT_NIR,idx=");
-            Serial.println(idx);
-            sendASReadings();
-            fifoQueue[idx].nirRequested = false;
-            break; // one read per window
-          }
+      // Handle NIR read window (per-item, based on cam arrival)
+      for (int i = 0; i < queueCount; i++) {
+        int idx = (headIndex + i) % MAX_QUEUE;
+        if (fifoQueue[idx].valid && fifoQueue[idx].nirRequested && fifoQueue[idx].camArrivedAt > 0 && (now - fifoQueue[idx].camArrivedAt >= TIME_TO_NIR_MS)) {
+          Serial.print("ACK,AT_NIR,idx=");
+          Serial.println(idx);
+          sendASReadings();
+          fifoQueue[idx].nirRequested = false;
+          break; // one read per cycle (assume sensor handles one at a time)
         }
       }
 
@@ -646,6 +672,7 @@ void loop() {
   updateMotor();
   updateServo();
   checkStartUltrasonicTrigger();
+  checkCamUltrasonicTrigger();
   checkFlapUltrasonicTrigger();
   updateStateMachine();
 

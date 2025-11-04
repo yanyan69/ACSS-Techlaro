@@ -28,6 +28,7 @@ Changes:
 # Update on November 05, 2025: Removed unused self.class_to_sort and related comment (dead code cleanup).
 # Update on November 05, 2025: Updated category_map to match user's model: {0: 'overcooked-copra', 1: 'raw-copra', 2: 'standard-copra'}.
 # Update on November 05, 2025: Increased CLASSIFICATION_TIMEOUT_S to 2.8s (close to Arduino's 3s). Added conf/cls logging in no-candidates case. Increased YOLO_FRAME_SKIP to 10 for lower load if needed (test/adjust).
+# Update on November 05, 2025: Made bounding box update frequency adjustable via YOLO_FRAME_SKIP constant. Persisted last detection results to draw boxes consistently on every frame, avoiding flickering. Boxes now update only every SKIP frames but remain displayed until new detection.
 """
 
 import tkinter as tk
@@ -70,11 +71,11 @@ SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"
-CLASSIFICATION_TIMEOUT_S = 2.8  # Increased close to Arduino's 3s limit
+CLASSIFICATION_TIMEOUT_S = 2.8  # Increased close to Arduino's 3s
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
-YOLO_FRAME_SKIP = 10  # Increased to 10 for lower load; test/adjust for ~3 FPS
+YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 
 # ---------------------------------------------------
 
@@ -121,7 +122,7 @@ class ACSSGui:
         self.serial_reader_thread_obj = None
         self.serial_error_logged = False
         self.frame_drop_logged = False
-        self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
+        self.moisture_sums = {'raw-copra': 0.0, 'standard-copra': 0.0, 'overcooked-copra': 0.0}
         self.category_map = {0: 'overcooked-copra', 1: 'raw-copra', 2: 'standard-copra'}  # Updated to match user's model classes
         self.stats = {
             'raw-copra': 0,
@@ -134,6 +135,7 @@ class ACSSGui:
         self.copra_counter = 0
         self.last_ping_time = 0
         self.frame_counter = 0
+        self.last_results = None  # To persist bounding boxes for consistent display
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -463,7 +465,7 @@ class ACSSGui:
                             print(f"ARDUINO: {line}")
                             if line.startswith("ACK,AT_CAM"):
                                 # Parse ID from ACK,AT_CAM,idx=...,id=...
-                                parts = line.split(',')
+                                parts = line.split(",")
                                 id = None
                                 for part in parts:
                                     if 'id=' in part:
@@ -610,7 +612,6 @@ class ACSSGui:
             self.send_cmd("AUTO_ENABLE")
             self.stats['start_time'] = time.time()
             self.stats['end_time'] = None
-            self.stats['end_time'] = None
             self.serial_error_logged = False
             self.frame_drop_logged = False
             self.last_ping_time = time.time()
@@ -693,7 +694,11 @@ class ACSSGui:
                         max_det=3,
                         verbose=False
                     )
-                    frame = results[0].plot()  # Use YOLO's plot() for bounding boxes
+                    self.last_results = results  # Persist last results
+
+                # Draw persisted bounding boxes if available
+                if self.last_results and self.last_results[0].boxes:
+                    frame = self.last_results[0].plot()  # Draw persisted boxes
 
                 with self.frame_lock:
                     self.latest_frame = frame

@@ -21,6 +21,13 @@ Changes:
 - Set serial timeout to 1s for better reading.
 - Updated category_map to match model classes: {0: 'Overcooked', 1: 'Raw', 2: 'Standard'}
 - Failsafe remains OVERCOOKED.
+
+# Update on November 05, 2025: Fixed mismatched moisture calculation to align with category_map (Overcooked low, Raw high, Standard mid). Removed cls=2 force in else.
+# Update on November 05, 2025: Added ID parsing from ACK,AT_CAM and sending CLASS,ID to sync with Arduino FIFO queue.
+# Update on November 05, 2025: Replaced strupr with command.upper() to fix runtime error.
+# Update on November 05, 2025: Removed unused self.class_to_sort and related comment (dead code cleanup).
+# Update on November 05, 2025: Updated category_map to match user's model: {0: 'overcooked-copra', 1: 'raw-copra', 2: 'standard-copra'}.
+# Update on November 05, 2025: Increased CLASSIFICATION_TIMEOUT_S to 2.8s (close to Arduino's 3s). Added conf/cls logging in no-candidates case. Increased YOLO_FRAME_SKIP to 10 for lower load if needed (test/adjust).
 """
 
 import tkinter as tk
@@ -63,11 +70,11 @@ SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"
-CLASSIFICATION_TIMEOUT_S = 2.5  # Within Arduino's CLASS_WAIT_MS = 3000ms
+CLASSIFICATION_TIMEOUT_S = 2.8  # Increased close to Arduino's 3s limit
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
-YOLO_FRAME_SKIP = 5  # Target ~3 FPS for bounding box updates (assuming ~15 FPS camera)
+YOLO_FRAME_SKIP = 10  # Increased to 10 for lower load; test/adjust for ~3 FPS
 
 # ---------------------------------------------------
 
@@ -115,12 +122,11 @@ class ACSSGui:
         self.serial_error_logged = False
         self.frame_drop_logged = False
         self.moisture_sums = {'Raw': 0.0, 'Standard': 0.0, 'Overcooked': 0.0}
-        self.class_to_sort = {0: 'L', 1: 'C', 2: 'R'}  # Arduino maps 'C' to no servo action
-        self.category_map = {0: 'Overcooked', 1: 'Raw', 2: 'Standard'}  # Swapped to match model classes
+        self.category_map = {0: 'overcooked-copra', 1: 'raw-copra', 2: 'standard-copra'}  # Updated to match user's model classes
         self.stats = {
-            'Raw': 0,
-            'Standard': 0,
-            'Overcooked': 0,
+            'raw-copra': 0,
+            'standard-copra': 0,
+            'overcooked-copra': 0,
             'total': 0,
             'start_time': None,
             'end_time': None
@@ -209,7 +215,7 @@ class ACSSGui:
 
     def _toggle_process(self):
         if not self.process_running:
-            if not (self.serial and self.serial.is_open):
+            if not self.serial or not self.serial.is_open:
                 self._log_message("Error: Serial port not open. Check connection.")
                 return
             if not self.yolo:
@@ -232,7 +238,7 @@ class ACSSGui:
         print(msg)
         if console_only:
             return
-        ts = time.strftime("%H:%M:S")
+        ts = time.strftime("%H:%M:%S")
         full_msg = f"[{ts}] {msg}"
         self.log.config(state='normal')
         self.log.insert("end", full_msg + "\n")
@@ -256,7 +262,7 @@ class ACSSGui:
         for col, header in enumerate(headers):
             tk.Label(stats_frame, text=header, font=("Arial", 10, "bold")).grid(row=1, column=col, padx=8, pady=4)
 
-        categories = ["Standard", "Raw", "Overcooked"]
+        categories = ["standard-copra", "raw-copra", "overcooked-copra"]
         self.stat_pieces = {}
         self.stat_moisture = {}
         for i, cat in enumerate(categories, start=2):
@@ -287,7 +293,7 @@ class ACSSGui:
 
     def _reset_stats(self):
         self.send_cmd("RESET")
-        for cat in ["Raw", "Standard", "Overcooked"]:
+        for cat in ["raw-copra", "standard-copra", "overcooked-copra"]:
             self.stats[cat] = 0
             self.moisture_sums[cat] = 0.0
         self.stats['total'] = 0
@@ -325,7 +331,7 @@ class ACSSGui:
 
         try:
             img = Image.open("resources/profiles/acss-3d.png")
-            img = img.resize((200, 200), Image.LANCZOS)
+            img = img.resize((200, 200), Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(img)
             img_label = tk.Label(about_frame, image=photo)
             img_label.image = photo
@@ -364,7 +370,7 @@ class ACSSGui:
 
             try:
                 img = Image.open(f"resources/profiles/{img_path}")
-                img = img.resize((100, 100), Image.LANCZOS)
+                img = img.resize((100, 100), Image.Resampling.LANCZOS)
                 photo = ImageTk.PhotoImage(img)
                 img_label = tk.Label(member_frame, image=photo)
                 img_label.image = photo
@@ -456,7 +462,14 @@ class ACSSGui:
                         if line:
                             print(f"ARDUINO: {line}")
                             if line.startswith("ACK,AT_CAM"):
-                                self.perform_classification()
+                                # Parse ID from ACK,AT_CAM,idx=...,id=...
+                                parts = line.split(',')
+                                id = None
+                                for part in parts:
+                                    if 'id=' in part:
+                                        id = int(part.split('=')[1])
+                                        break
+                                self.perform_classification(id)
                             elif line == "TRIG,FLAP_OBJECT_DETECTED":
                                 self._log_message("Copra detected at flapper, centering for sorting.")
                             elif line == "ERR,MOTOR_TIMEOUT":
@@ -493,7 +506,7 @@ class ACSSGui:
         except Exception as outer:
             self._log_message(f"Serial reader crashed: {outer}")
 
-    def perform_classification(self):
+    def perform_classification(self, id=None):
         start_time = time.time()
         for attempt in range(CLASSIFICATION_RETRIES):
             try:
@@ -504,13 +517,13 @@ class ACSSGui:
                             time.sleep(0.1)
                             continue
                         self._log_message("No recent frame available after retries. Defaulting to OVERCOOKED.")
-                        self.send_cmd("OVERCOOKED")
+                        self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
                         return
                     frame = self.latest_frame.copy()
 
                 if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
                     self._log_message("Classification timeout: Frame capture too slow. Defaulting to OVERCOOKED.")
-                    self.send_cmd("OVERCOOKED")
+                    self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
                     return
 
                 results = self.yolo.track(
@@ -525,7 +538,7 @@ class ACSSGui:
 
                 if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
                     self._log_message("Classification timeout: YOLO prediction too slow. Defaulting to OVERCOOKED.")
-                    self.send_cmd("OVERCOOKED")
+                    self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
                     return
 
                 has_detection = results and results[0].boxes and len(results[0].boxes) > 0
@@ -540,12 +553,11 @@ class ACSSGui:
                         conf = conf_tensor[i]
                         if conf > 0.25:
                             print(f"Detected cls: {cls}, conf: {conf}")  # Log cls for debugging
-                            if cls == 0:  # Raw
+                            if cls == 1:  # raw-copra: high moisture
                                 moisture = 7.1 + (conf - 0.25) * (60.0 - 7.1) / 0.75
-                            elif cls == 1:  # Standard
+                            elif cls == 2:  # standard-copra: mid
                                 moisture = 6.0 + (conf - 0.25) * (7.0 - 6.0) / 0.75
-                            else:  # Overcooked or unknown
-                                cls = 2
+                            else:  # overcooked-copra (0 or unknown): low
                                 moisture = 4.0 + (conf - 0.25) * (5.9 - 4.0) / 0.75
                             moisture = round(moisture, 1)
                             candidates.append((cls, conf, moisture))
@@ -553,10 +565,10 @@ class ACSSGui:
                     if candidates:
                         candidates.sort(key=lambda x: x[1], reverse=True)
                         cls, conf, moisture = candidates[0]
-                        category = self.category_map.get(cls, 'Overcooked')
+                        category = self.category_map.get(cls, 'overcooked-copra')
                         class_str = category.upper()
                         print(f"Attempting to send classification: {class_str}")
-                        success = self.send_cmd(class_str)
+                        success = self.send_cmd(f"{class_str},{id if id is not None else 0}")
                         print(f"Send success: {success}")
                         if success:
                             self.copra_counter += 1
@@ -568,14 +580,15 @@ class ACSSGui:
                             self.root.after(0, self.update_stats)
                         else:
                             self._log_message("Send failed. Defaulting to OVERCOOKED.")
-                            self.send_cmd("OVERCOOKED")
+                            self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
                         return
                     else:
                         self._log_message("No confident detection. Defaulting to OVERCOOKED.")
-                        self.send_cmd("OVERCOOKED")
+                        print(f"No confident detection, max conf: {max(conf_tensor) if len(conf_tensor)>0 else 'N/A'}")  # Log for debugging
+                        self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
                 else:
                     self._log_message("No objects detected by YOLO. Defaulting to OVERCOOKED.")
-                    self.send_cmd("OVERCOOKED")
+                    self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
                 return
             except Exception as e:
                 if attempt < CLASSIFICATION_RETRIES - 1:
@@ -583,7 +596,7 @@ class ACSSGui:
                     time.sleep(0.1)
                     continue
                 self._log_message(f"Classification failed after retries: {e}. Defaulting to OVERCOOKED.")
-                self.send_cmd("OVERCOOKED")
+                self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
                 return
 
     def start_process(self):
@@ -596,6 +609,7 @@ class ACSSGui:
                 return
             self.send_cmd("AUTO_ENABLE")
             self.stats['start_time'] = time.time()
+            self.stats['end_time'] = None
             self.stats['end_time'] = None
             self.serial_error_logged = False
             self.frame_drop_logged = False
@@ -718,7 +732,7 @@ class ACSSGui:
 
     def update_stats(self):
         try:
-            for cat in ["Standard", "Raw", "Overcooked"]:
+            for cat in ["standard-copra", "raw-copra", "overcooked-copra"]:
                 pieces = self.stats[cat]
                 self.stat_pieces[cat].config(text=str(pieces))
                 moisture_avg = (self.moisture_sums[cat] / pieces) if pieces > 0 else 0.0
@@ -728,8 +742,8 @@ class ACSSGui:
             total_moisture = sum(self.moisture_sums.values())
             total_avg = (total_moisture / total_pieces) if total_pieces > 0 else 0.0
             self.total_moisture_label.config(text=f"{total_avg:.1f}%")
-            start_str = time.strftime("%H:%M:S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
-            end_str = time.strftime("%H:%M:S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
+            start_str = time.strftime("%H:%M:%S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
+            end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
             self.start_time_label.config(text=start_str)
             self.end_time_label.config(text=end_str)
             self.root.update()

@@ -538,7 +538,7 @@ class ACSSGui:
                     source=frame,
                     persist=True,
                     tracker=TRACKER_PATH,
-                    conf=0.3,  # Increased to 0.3 for fewer false positives
+                    conf=0.5,  # Increased to 0.3 for fewer false positives
                     max_det=1,  # Reduced to 1 for faster processing
                     verbose=False
                 )

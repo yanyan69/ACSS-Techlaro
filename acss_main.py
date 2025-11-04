@@ -30,6 +30,7 @@ Changes:
 # Update on November 05, 2025: Increased CLASSIFICATION_TIMEOUT_S to 2.8s (close to Arduino's 3s). Added conf/cls logging in no-candidates case. Increased YOLO_FRAME_SKIP to 10 for lower load if needed (test/adjust).
 # Update on November 05, 2025: Made bounding box update frequency adjustable via YOLO_FRAME_SKIP constant. Persisted last detection results to draw boxes consistently on every frame, avoiding flickering. Boxes now update only every SKIP frames but remain displayed until new detection.
 # Update on November 05, 2025: Added Clear Log button below log frame in home tab. Adjusted perform_classification to loop retries until close to 3s timeout, maximizing YOLO stabilization time before defaulting to OVERCOOKED.
+# Update on November 05, 2025: Updated perform_classification to run YOLO multiple times over ~2.8s, collect candidates, and send the most confident class at the end for stabilization.
 """
 
 import tkinter as tk
@@ -520,26 +521,15 @@ class ACSSGui:
 
     def perform_classification(self, id=None):
         start_time = time.time()
-        end_time = start_time + CLASSIFICATION_TIMEOUT_S
-        attempt = 0
-        while time.time() < end_time and attempt < CLASSIFICATION_RETRIES:
+        all_candidates = []  # Collect candidates over time
+        num_runs = 0
+        while time.time() - start_time < CLASSIFICATION_TIMEOUT_S:
             try:
                 with self.frame_lock:
-                    if self.latest_frame is None or (time.time() - self.latest_frame_time) > MAX_FRAME_AGE_S:
-                        if attempt < CLASSIFICATION_RETRIES - 1:
-                            print(f"Stale frame on attempt {attempt + 1}, retrying...")
-                            time.sleep(0.1)
-                            attempt += 1
-                            continue
-                        self._log_message("No recent frame available after retries. Defaulting to OVERCOOKED.")
-                        self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
-                        return
+                    if self.latest_frame is None:
+                        time.sleep(0.1)
+                        continue
                     frame = self.latest_frame.copy()
-
-                if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
-                    self._log_message("Classification timeout: Frame capture too slow. Defaulting to OVERCOOKED.")
-                    self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
-                    return
 
                 results = self.yolo.track(
                     source=frame,
@@ -549,20 +539,13 @@ class ACSSGui:
                     max_det=1,  # Reduced to 1 for faster processing
                     verbose=False
                 )
-                print(f"Classification time after predict: {time.time() - start_time:.2f}s")  # Log time
-
-                if time.time() - start_time > CLASSIFICATION_TIMEOUT_S:
-                    self._log_message("Classification timeout: YOLO prediction too slow. Defaulting to OVERCOOKED.")
-                    self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
-                    return
+                num_runs += 1
 
                 has_detection = results and results[0].boxes and len(results[0].boxes) > 0
 
                 if has_detection:
-                    boxes = results[0].boxes.xyxy.cpu().numpy()
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                     conf_tensor = results[0].boxes.conf.cpu().numpy()
-                    candidates = []
                     for i in range(len(cls_tensor)):
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
@@ -575,45 +558,38 @@ class ACSSGui:
                             else:  # overcooked-copra (0 or unknown): low
                                 moisture = 4.0 + (conf - 0.25) * (5.9 - 4.0) / 0.75
                             moisture = round(moisture, 1)
-                            candidates.append((cls, conf, moisture))
+                            all_candidates.append((cls, conf, moisture))
 
-                    if candidates:
-                        candidates.sort(key=lambda x: x[1], reverse=True)
-                        cls, conf, moisture = candidates[0]
-                        category = self.category_map.get(cls, 'overcooked-copra')
-                        class_str = category.upper()
-                        print(f"Attempting to send classification: {class_str}")
-                        success = self.send_cmd(f"{class_str},{id if id is not None else 0}")
-                        print(f"Send success: {success}")
-                        if success:
-                            self.copra_counter += 1
-                            self._log_message(f"{category} Copra # {self.copra_counter:04d}")
-                            self._log_message(f"Moisture: {moisture}%")
-                            self.stats[category] += 1
-                            self.stats['total'] += 1
-                            self.moisture_sums[category] += moisture
-                            self.root.after(0, self.update_stats)
-                        else:
-                            self._log_message("Send failed. Defaulting to OVERCOOKED.")
-                            self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
-                        return
-                    else:
-                        self._log_message("No confident detection. Defaulting to OVERCOOKED.")
-                        print(f"No confident detection, max conf: {max(conf_tensor) if len(conf_tensor)>0 else 'N/A'}")  # Log for debugging
-                        self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
-                else:
-                    self._log_message("No objects detected by YOLO. Defaulting to OVERCOOKED.")
-                    self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
-                return
+                time.sleep(0.5)  # Pause between runs (adjust for more/less samples; e.g., 0.5s for ~5 runs in 2.8s)
             except Exception as e:
-                if attempt < CLASSIFICATION_RETRIES - 1:
-                    print(f"Classification error on attempt {attempt + 1}: {e}, retrying...")
-                    time.sleep(0.1)
-                    attempt += 1
-                    continue
-                self._log_message(f"Classification failed after retries: {e}. Defaulting to OVERCOOKED.")
+                print(f"Classification run error: {e}")
+                time.sleep(0.1)
+
+        print(f"Completed {num_runs} YOLO runs in {time.time() - start_time:.2f}s")
+
+        if all_candidates:
+            all_candidates.sort(key=lambda x: x[1], reverse=True)
+            cls, conf, moisture = all_candidates[0]  # Select highest conf
+            category = self.category_map.get(cls, 'overcooked-copra')
+            class_str = category.upper()
+            print(f"Attempting to send classification: {class_str}")
+            success = self.send_cmd(f"{class_str},{id if id is not None else 0}")
+            print(f"Send success: {success}")
+            if success:
+                self.copra_counter += 1
+                self._log_message(f"{category} Copra # {self.copra_counter:04d}")
+                self._log_message(f"Moisture: {moisture}%")
+                self.stats[category] += 1
+                self.stats['total'] += 1
+                self.moisture_sums[category] += moisture
+                self.root.after(0, self.update_stats)
+            else:
+                self._log_message("Send failed. Defaulting to OVERCOOKED.")
                 self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
-                return
+        else:
+            self._log_message("No detections over time. Defaulting to OVERCOOKED.")
+            print("No candidates found across all runs.")  # Log for debugging
+            self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
 
     def start_process(self):
         try:

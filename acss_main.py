@@ -31,6 +31,7 @@ Changes:
 # Update on November 05, 2025: Made bounding box update frequency adjustable via YOLO_FRAME_SKIP constant. Persisted last detection results to draw boxes consistently on every frame, avoiding flickering. Boxes now update only every SKIP frames but remain displayed until new detection.
 # Update on November 05, 2025: Added Clear Log button below log frame in home tab. Adjusted perform_classification to loop retries until close to 3s timeout, maximizing YOLO stabilization time before defaulting to OVERCOOKED.
 # Update on November 05, 2025: Updated perform_classification to run YOLO multiple times over ~2.8s, collect candidates, and send the most frequent class (averaged detection) at the end for stabilization. Added retry on send_cmd if failed. Stripped '-copra' from log category for cleaner output (e.g., "Raw Copra #0003").
+# Update on November 05, 2025: Stripped '-copra' from sent class_str to match Arduino's strToClass (e.g., "OVERCOOKED" instead of "OVERCOOKED-COPRA"). Commented out flapper log as unnecessary.
 """
 
 import tkinter as tk
@@ -484,8 +485,8 @@ class ACSSGui:
                                         id = int(part.split('=')[1])
                                         break
                                 self.perform_classification(id)
-                            elif line == "TRIG,FLAP_OBJECT_DETECTED":
-                                self._log_message("Copra detected at flapper, centering for sorting.")
+                            # Commented out: elif line == "TRIG,FLAP_OBJECT_DETECTED":
+                                # self._log_message("Copra detected at flapper, centering for sorting.")
                             elif line == "ERR,MOTOR_TIMEOUT":
                                 self._log_message("Error: Camera sensor missed object. Check alignment, distance (<10cm), or jump (>27cm).")
                             elif line.startswith("ERR,FIFO_FULL"):
@@ -576,7 +577,7 @@ class ACSSGui:
             filtered.sort(key=lambda x: x[1], reverse=True)
             cls, conf, moisture = filtered[0]
             category = self.category_map.get(cls, 'overcooked-copra')
-            class_str = category.upper()
+            class_str = category.upper().replace('-COPRA', '')  # Strip '-copra' to match Arduino's strToClass
             print(f"Attempting to send classification: {class_str}")
             success = self.send_cmd(f"{class_str},{id if id is not None else 0}")
             print(f"Send success: {success}")

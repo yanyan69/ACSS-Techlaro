@@ -578,6 +578,9 @@ class ACSSGui:
                             self.send_cmd("OVERCOOKED")
                         return
                     else:
+                        # Update on November 05, 2025: Added logging for no confident detections with max conf for debugging.
+                        max_conf = max(conf_tensor) if len(conf_tensor) > 0 else 'N/A'
+                        print(f"No confident detection, max conf: {max_conf}")
                         self._log_message("No confident detection. Defaulting to OVERCOOKED.")
                         self.send_cmd("OVERCOOKED")
                 else:

@@ -29,6 +29,7 @@ Changes:
 # Update on November 05, 2025: Updated category_map to match user's model: {0: 'overcooked-copra', 1: 'raw-copra', 2: 'standard-copra'}.
 # Update on November 05, 2025: Increased CLASSIFICATION_TIMEOUT_S to 2.8s (close to Arduino's 3s). Added conf/cls logging in no-candidates case. Increased YOLO_FRAME_SKIP to 10 for lower load if needed (test/adjust).
 # Update on November 05, 2025: Made bounding box update frequency adjustable via YOLO_FRAME_SKIP constant. Persisted last detection results to draw boxes consistently on every frame, avoiding flickering. Boxes now update only every SKIP frames but remain displayed until new detection.
+# Update on November 05, 2025: Added Clear Log button below log frame in home tab. Adjusted perform_classification to loop retries until close to 3s timeout, maximizing YOLO stabilization time before defaulting to OVERCOOKED.
 """
 
 import tkinter as tk
@@ -214,6 +215,15 @@ class ACSSGui:
         log_frame.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
         self.log = scrolledtext.ScrolledText(log_frame, state='disabled', wrap='word', height=20, width=40)
         self.log.pack(fill='both', expand=True)
+
+        # Clear Log button
+        clear_log_btn = tk.Button(log_frame, text="Clear Log", command=self._clear_log)
+        clear_log_btn.pack(pady=5)
+
+    def _clear_log(self):
+        self.log.config(state='normal')
+        self.log.delete('1.0', tk.END)
+        self.log.config(state='disabled')
 
     def _toggle_process(self):
         if not self.process_running:
@@ -510,13 +520,16 @@ class ACSSGui:
 
     def perform_classification(self, id=None):
         start_time = time.time()
-        for attempt in range(CLASSIFICATION_RETRIES):
+        end_time = start_time + CLASSIFICATION_TIMEOUT_S
+        attempt = 0
+        while time.time() < end_time and attempt < CLASSIFICATION_RETRIES:
             try:
                 with self.frame_lock:
                     if self.latest_frame is None or (time.time() - self.latest_frame_time) > MAX_FRAME_AGE_S:
                         if attempt < CLASSIFICATION_RETRIES - 1:
                             print(f"Stale frame on attempt {attempt + 1}, retrying...")
                             time.sleep(0.1)
+                            attempt += 1
                             continue
                         self._log_message("No recent frame available after retries. Defaulting to OVERCOOKED.")
                         self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
@@ -596,6 +609,7 @@ class ACSSGui:
                 if attempt < CLASSIFICATION_RETRIES - 1:
                     print(f"Classification error on attempt {attempt + 1}: {e}, retrying...")
                     time.sleep(0.1)
+                    attempt += 1
                     continue
                 self._log_message(f"Classification failed after retries: {e}. Defaulting to OVERCOOKED.")
                 self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")

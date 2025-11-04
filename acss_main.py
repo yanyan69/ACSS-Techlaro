@@ -67,7 +67,7 @@ CLASSIFICATION_TIMEOUT_S = 2.5  # Within Arduino's CLASS_WAIT_MS = 3000ms
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
-YOLO_FRAME_SKIP = 5  # Target ~3 FPS for bounding box updates (assuming ~15 FPS camera)
+YOLO_FRAME_SKIP = 1  # Update on November 05, 2025: Reduced to 1 for consistent bounding boxes without flickering (may increase load; adjust if needed).
 
 # ---------------------------------------------------
 
@@ -578,7 +578,7 @@ class ACSSGui:
                             self.send_cmd("OVERCOOKED")
                         return
                     else:
-                        # Update on November 05, 2025: Added logging for no confident detections with max conf for debugging.
+                        # Update on November 05, 2025: Added conf/cls logging for no candidates to debug YOLO failures.
                         max_conf = max(conf_tensor) if len(conf_tensor) > 0 else 'N/A'
                         print(f"No confident detection, max conf: {max_conf}")
                         self._log_message("No confident detection. Defaulting to OVERCOOKED.")
@@ -727,8 +727,8 @@ class ACSSGui:
                 self.cam_canvas.imgtk = imgtk
                 self.cam_canvas.create_image(0, 0, anchor='nw', image=imgtk)
             else:
-                cv2.imshow("Camera Preview", bgr_frame)
-                cv2.waitKey(1)
+                # Update on November 05, 2025: Removed cv2.imshow fallback to ensure preview is integrated into GUI canvas (requires PIL; install if missing).
+                print("PIL not available - camera preview disabled in canvas.")
         except Exception as e:
             self._log_message(f"Display frame error: {e}")
 

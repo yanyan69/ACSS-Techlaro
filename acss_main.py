@@ -28,16 +28,11 @@ Changes:
 # Update on November 05, 2025: Removed unused self.class_to_sort and related comment (dead code cleanup).
 # Update on November 05, 2025: Updated category_map to match user's model: {0: 'overcooked-copra', 1: 'raw-copra', 2: 'standard-copra'}.
 # Update on November 05, 2025: Increased CLASSIFICATION_TIMEOUT_S to 2.8s (close to Arduino's 3s). Added conf/cls logging in no-candidates case. Increased YOLO_FRAME_SKIP to 10 for lower load if needed (test/adjust).
-# Update on November 05, 2025: Made bounding box update frequency adjustable via YOLO_FRAME_SKIP constant. Persisted last detection results to draw boxes consistently on every frame, avoiding flickering. Boxes now update only every SKIP frames but remain displayed until new detection.
-# Update on November 05, 2025: Added Clear Log button below log frame in home tab. Adjusted perform_classification to loop retries until close to 3s timeout, maximizing YOLO stabilization time before defaulting to OVERCOOKED.
-# Update on November 05, 2025: Updated perform_classification to run YOLO multiple times over ~2.8s, collect candidates, and send the most frequent class (averaged detection) at the end for stabilization. Added retry on send_cmd if failed. Stripped '-copra' from log category for cleaner output (e.g., "Raw Copra #0003").
-# Update on November 05, 2025: Stripped '-copra' from sent class_str to match Arduino's strToClass (e.g., "OVERCOOKED" instead of "OVERCOOKED-COPRA"). Commented out flapper log as unnecessary.
 """
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import sys, threading, time
-from collections import Counter
 
 # Optional imports (graceful degradation)
 try:
@@ -79,7 +74,7 @@ CLASSIFICATION_TIMEOUT_S = 2.8  # Increased close to Arduino's 3s
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
-YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
+YOLO_FRAME_SKIP = 10  # Increased to 10 for lower load; test/adjust
 
 # ---------------------------------------------------
 
@@ -139,7 +134,6 @@ class ACSSGui:
         self.copra_counter = 0
         self.last_ping_time = 0
         self.frame_counter = 0
-        self.last_results = None  # To persist bounding boxes for consistent display
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -485,8 +479,8 @@ class ACSSGui:
                                         id = int(part.split('=')[1])
                                         break
                                 self.perform_classification(id)
-                            # Commented out: elif line == "TRIG,FLAP_OBJECT_DETECTED":
-                                # self._log_message("Copra detected at flapper, centering for sorting.")
+                            elif line == "TRIG,FLAP_OBJECT_DETECTED":
+                                self._log_message("Copra detected at flapper, centering for sorting.")
                             elif line == "ERR,MOTOR_TIMEOUT":
                                 self._log_message("Error: Camera sensor missed object. Check alignment, distance (<10cm), or jump (>27cm).")
                             elif line.startswith("ERR,FIFO_FULL"):

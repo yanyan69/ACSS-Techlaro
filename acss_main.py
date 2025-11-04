@@ -30,12 +30,13 @@ Changes:
 # Update on November 05, 2025: Increased CLASSIFICATION_TIMEOUT_S to 2.8s (close to Arduino's 3s). Added conf/cls logging in no-candidates case. Increased YOLO_FRAME_SKIP to 10 for lower load if needed (test/adjust).
 # Update on November 05, 2025: Made bounding box update frequency adjustable via YOLO_FRAME_SKIP constant. Persisted last detection results to draw boxes consistently on every frame, avoiding flickering. Boxes now update only every SKIP frames but remain displayed until new detection.
 # Update on November 05, 2025: Added Clear Log button below log frame in home tab. Adjusted perform_classification to loop retries until close to 3s timeout, maximizing YOLO stabilization time before defaulting to OVERCOOKED.
-# Update on November 05, 2025: Updated perform_classification to run YOLO multiple times over ~2.8s, collect candidates, and send the most confident class at the end for stabilization.
+# Update on November 05, 2025: Updated perform_classification to run YOLO multiple times over ~2.8s, collect candidates, and send the most frequent class (averaged detection) at the end for stabilization. Added retry on send_cmd if failed. Stripped '-copra' from log category for cleaner output (e.g., "Raw Copra #0003").
 """
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import sys, threading, time
+from collections import Counter
 
 # Optional imports (graceful degradation)
 try:
@@ -568,8 +569,12 @@ class ACSSGui:
         print(f"Completed {num_runs} YOLO runs in {time.time() - start_time:.2f}s")
 
         if all_candidates:
-            all_candidates.sort(key=lambda x: x[1], reverse=True)
-            cls, conf, moisture = all_candidates[0]  # Select highest conf
+            class_counts = Counter([c[0] for c in all_candidates])
+            most_common_cls = class_counts.most_common(1)[0][0]
+            # Get highest conf for that cls
+            filtered = [c for c in all_candidates if c[0] == most_common_cls]
+            filtered.sort(key=lambda x: x[1], reverse=True)
+            cls, conf, moisture = filtered[0]
             category = self.category_map.get(cls, 'overcooked-copra')
             class_str = category.upper()
             print(f"Attempting to send classification: {class_str}")
@@ -577,15 +582,22 @@ class ACSSGui:
             print(f"Send success: {success}")
             if success:
                 self.copra_counter += 1
-                self._log_message(f"{category} Copra # {self.copra_counter:04d}")
+                self._log_message(f"{category.split('-')[0].capitalize()} Copra # {self.copra_counter:04d}")
                 self._log_message(f"Moisture: {moisture}%")
                 self.stats[category] += 1
                 self.stats['total'] += 1
                 self.moisture_sums[category] += moisture
                 self.root.after(0, self.update_stats)
             else:
-                self._log_message("Send failed. Defaulting to OVERCOOKED.")
-                self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
+                self._log_message("Send failed. Retrying once...")
+                time.sleep(0.5)
+                success = self.send_cmd(f"{class_str},{id if id is not None else 0}")
+                if success:
+                    # Log success on retry
+                    print("Retry send success")
+                else:
+                    self._log_message("Retry failed. Defaulting to OVERCOOKED.")
+                    self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
         else:
             self._log_message("No detections over time. Defaulting to OVERCOOKED.")
             print("No candidates found across all runs.")  # Log for debugging

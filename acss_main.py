@@ -607,7 +607,7 @@ class ACSSGui:
                     source=frame,
                     persist=True,
                     tracker=TRACKER_PATH,
-                    conf=0.5,
+                    conf=0.6,
                     max_det=1,
                     verbose=False
                 )

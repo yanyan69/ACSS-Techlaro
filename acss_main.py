@@ -33,6 +33,7 @@ Changes:
 # Update on November 05, 2025: Updated perform_classification to run YOLO multiple times over ~2.8s, collect candidates, and send the most frequent class (averaged detection) at the end for stabilization. Added retry on send_cmd if failed. Stripped '-copra' from log category for cleaner output (e.g., "Raw Copra #0003").
 # Update on November 05, 2025: Stripped '-copra' from sent class_str to match Arduino's strToClass (e.g., "OVERCOOKED" instead of "OVERCOOKED-COPRA"). Commented out flapper log as unnecessary.
 # Update on November 05, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.8s and sleep to 0.1s to send classification faster, avoiding Arduino 3s timeout race. Added early exit if clear majority in candidates. Increased conf to 0.3 for fewer false positives.
+# Update on November 07, 2025: Addressed gaps in classifications and cam US. Added XOR checksum to send_cmd. Reduced CLASSIFICATION_TIMEOUT_S to 1.5s and sleep to 0.05s with early exit after 2 runs on majority. Handled ACK,CLASS_RECEIVED,id=... for sync. Added periodic GET_CAM_DIST polling every 10s for logs. Handled ERR,CAM_SENSOR_FAIL with alert. Logged ACK,HEARTBEAT as confirm.
 """
 
 import tkinter as tk
@@ -76,11 +77,12 @@ SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"
-CLASSIFICATION_TIMEOUT_S = 1.8  # Reduced to 1.8s to send before Arduino 3s timeout
+CLASSIFICATION_TIMEOUT_S = 1.5  # Reduced further to avoid race
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
+CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
 
 # ---------------------------------------------------
 
@@ -119,6 +121,7 @@ class ACSSGui:
         self.running = True
         self.camera_thread = None
         self.ping_thread = None
+        self.cam_poll_thread = None
         self.picam2 = None
         self.yolo = None
         self.frame_lock = threading.Lock()
@@ -432,7 +435,9 @@ class ACSSGui:
             self.serial_reader_thread_obj.start()
             self.ping_thread = threading.Thread(target=self.ping_loop, daemon=True)
             self.ping_thread.start()
-            print("Serial reader and ping threads started.")
+            self.cam_poll_thread = threading.Thread(target=self.cam_dist_poll_loop, daemon=True)
+            self.cam_poll_thread.start()
+            print("Serial reader, ping, and cam poll threads started.")
         except Exception as e:
             self._log_message(f"Failed to connect to Arduino: {e}")
 
@@ -450,11 +455,14 @@ class ACSSGui:
             if not self.serial or not self.serial.is_open:
                 self._log_message(f"Serial not open — can't send: {text}")
                 return False
-            full_cmd = (text.strip().upper() + "\n").encode('utf-8')
+            checksum = 0
+            for char in text:
+                checksum ^= ord(char)
+            full_cmd = (text.strip().upper() + f"|{checksum}\n").encode('utf-8')
             with self.serial_lock:
                 self.serial.write(full_cmd)
                 self.serial.flush()
-            print(f"Sent to Arduino: {text}")
+            print(f"Sent to Arduino: {text} with checksum {checksum}")
             return True
         except Exception as e:
             self._log_message(f"Failed to send command '{text}': {e}")
@@ -466,6 +474,11 @@ class ACSSGui:
                 self.send_cmd("PING")
                 self.last_ping_time = time.time()
             time.sleep(0.5)
+
+    def cam_dist_poll_loop(self):
+        while self.running and self.serial and self.serial.is_open:
+            self.send_cmd("GET_CAM_DIST")
+            time.sleep(CAM_DIST_POLL_INTERVAL_S)
 
     def serial_reader_thread(self):
         print("Serial reader started.")
@@ -503,16 +516,16 @@ class ACSSGui:
                                 self._log_message("Moving Standard copra (conveyor).")
                             elif line == "ACK,PING":
                                 print("Arduino responded to PING: Connection alive.")
-                            elif line.startswith("DBG,CAM_ULTRA,DIST="):
-                                parts = line.split(",")
-                                if len(parts) >= 3:
-                                    if "DETECTED_TIMEOUT" in line:
-                                        self._log_message("Camera sensor: Timeout detection (999cm).", console_only=True)
-                                    elif "DETECTED_JUMP" in line:
-                                        prev_dist = parts[-1].split("=")[1] if "=" in parts[-1] else "N/A"
-                                        self._log_message(f"Camera sensor: Distance jump detected (prev={prev_dist}cm).", console_only=True)
-                                    elif "DETECTED" in line:
-                                        self._log_message("Camera sensor: Close object detected (<10cm).", console_only=True)
+                            elif line.startswith("ACK,CLASS_RECEIVED,id="):
+                                self._log_message(f"Classification received by Arduino for id={line.split('=')[-1]}")
+                            elif line.startswith("ACK,CAM_DIST,"):
+                                dist = line.split(",")[-1]
+                                self._log_message(f"Camera US distance: {dist}cm", console_only=True)
+                            elif line == "ERR,CAM_SENSOR_FAIL":
+                                self._log_message("Error: Persistent camera sensor failure. Check wiring/hardware.")
+                                messagebox.showerror("Sensor Error", "Camera ultrasonic sensor failure detected!")
+                            elif line == "ACK,HEARTBEAT":
+                                print("Arduino heartbeat: Connection alive.")
                     time.sleep(0.01)  # Small sleep to avoid CPU spin
                 except Exception as e:
                     if not self.serial_error_logged:
@@ -530,7 +543,7 @@ class ACSSGui:
             try:
                 with self.frame_lock:
                     if self.latest_frame is None:
-                        time.sleep(0.1)
+                        time.sleep(0.05)
                         continue
                     frame = self.latest_frame.copy()
 
@@ -563,8 +576,8 @@ class ACSSGui:
                             moisture = round(moisture, 1)
                             all_candidates.append((cls, conf, moisture))
 
-                # Early exit if clear majority (at least 3 candidates, one class >=2x others)
-                if len(all_candidates) >= 3:
+                # Early exit if clear majority (at least 2 runs, one class >=2x others)
+                if len(all_candidates) >= 2:
                     class_counts = Counter([c[0] for c in all_candidates])
                     if class_counts:
                         top_cls, top_count = class_counts.most_common(1)[0]
@@ -572,10 +585,10 @@ class ACSSGui:
                             print("Early exit: Clear majority detected")
                             break  # Exit loop to send now
 
-                time.sleep(0.1)  # Reduced to 0.1s for faster looping
+                time.sleep(0.05)  # Reduced for faster looping
             except Exception as e:
                 print(f"Classification run error: {e}")
-                time.sleep(0.1)
+                time.sleep(0.05)
 
         print(f"Completed {num_runs} YOLO runs in {time.time() - start_time:.2f}s")
 

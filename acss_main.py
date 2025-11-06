@@ -40,6 +40,7 @@ Changes:
 # - Moisture logged 1 second after conveyor starts (ACK,MOTOR,START)
 # - All messages include Copra #ID for perfect queue tracking
 # Update on November 07, 2025: REMOVED ALL POP-UP ERROR WINDOWS. All errors now go to Log only.
+# Update on November 07, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.0s and sleep to 0.02s for faster send. Added handling for ERR,MISSED_CAM in log. Tied moisture delay to ACK,CLASS_RECEIVED. Synced default fallback with Arduino (query on start). Made no-detection send 'DEFAULT' to use Arduino's config. 
 """
 
 import tkinter as tk
@@ -83,7 +84,7 @@ SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"
-CLASSIFICATION_TIMEOUT_S = 1.5  # Reduced further to avoid race
+CLASSIFICATION_TIMEOUT_S = 1.0  # Reduced to send faster
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
@@ -533,6 +534,7 @@ class ACSSGui:
                         elif line.startswith("ACK,CLASS_RECEIVED,id="):
                             cid = line.split("=")[-1]
                             self._log_message(f"Classification received for Copra #{cid}")
+                            self.root.after(1000, self._delayed_moisture_log)  # Delay moisture after receipt
 
                         # === CONVEYOR STARTED → DELAY MOISTURE LOG ===
                         elif line.startswith("ACK,MOTOR,START"):
@@ -571,6 +573,8 @@ class ACSSGui:
                             self._log_message("CRITICAL: Camera ultrasonic sensor failed! Check wiring/hardware.")
                         elif line == "ACK,HEARTBEAT":
                             print("Arduino heartbeat OK")
+                        elif line == "ERR,MISSED_CAM":
+                            self._log_message("Missed camera detection – check sensor/copra alignment")
 
                     time.sleep(0.01)
                 except Exception as e:
@@ -588,11 +592,11 @@ class ACSSGui:
         all_candidates = []
         num_runs = 0
 
-        while time.time() - start_time < CLASSIFICATION_TIMEOUT_S:
+        while time.time() - start_time < CLASSIFICATION_TIMEOUT_S and num_runs < 5:  # Limit max runs for speed
             try:
                 with self.frame_lock:
                     if self.latest_frame is None:
-                        time.sleep(0.05)
+                        time.sleep(0.02)
                         continue
                     frame = self.latest_frame.copy()
 
@@ -629,10 +633,10 @@ class ACSSGui:
                         if all(count <= top_count / 2 for cls, count in class_counts.items() if cls != top_cls):
                             break
 
-                time.sleep(0.05)
+                time.sleep(0.02)  # Reduced for faster send
             except Exception as e:
                 print(f"YOLO error: {e}")
-                time.sleep(0.05)
+                time.sleep(0.02)
 
         if all_candidates:
             class_counts = Counter([c[0] for c in all_candidates])

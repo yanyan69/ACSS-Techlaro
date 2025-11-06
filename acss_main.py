@@ -67,7 +67,7 @@ try:
 except:
     PICAMERA2_AVAILABLE = False
 try:
-    from ultralyt ics import YOLO
+    from ultralytics import YOLO
     ULTRALYTICS_AVAILABLE = True
 except:
     ULTRALYTICS_AVAILABLE = False

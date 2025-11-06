@@ -34,6 +34,11 @@ Changes:
 # Update on November 05, 2025: Stripped '-copra' from sent class_str to match Arduino's strToClass (e.g., "OVERCOOKED" instead of "OVERCOOKED-COPRA"). Commented out flapper log as unnecessary.
 # Update on November 05, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.8s and sleep to 0.1s to send classification faster, avoiding Arduino 3s timeout race. Added early exit if clear majority in candidates. Increased conf to 0.3 for fewer false positives.
 # Update on November 07, 2025: Addressed gaps in classifications and cam US. Added XOR checksum to send_cmd. Reduced CLASSIFICATION_TIMEOUT_S to 1.5s and sleep to 0.05s with early exit after 2 runs on majority. Handled ACK,CLASS_RECEIVED,id=... for sync. Added periodic GET_CAM_DIST polling every 10s for logs. Handled ERR,CAM_SENSOR_FAIL with alert. Logged ACK,HEARTBEAT as confirm.
+# Update on November 07, 2025: Added full process flow logging with Copra #ID tracking.
+# - Logs Start US1 detection + queue entry
+# - Logs arrival at camera, classification, delayed moisture, and sorting
+# - Moisture logged 1 second after conveyor starts (ACK,MOTOR,START)
+# - All messages include Copra #ID for perfect queue tracking
 """
 
 import tkinter as tk
@@ -144,6 +149,9 @@ class ACSSGui:
         self.last_ping_time = 0
         self.frame_counter = 0
         self.last_results = None  # To persist bounding boxes for consistent display
+        self.pending_moisture_log = None  # For delayed moisture logging
+        self.last_moisture = None
+        self.last_sorted_id = "??"
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -263,6 +271,11 @@ class ACSSGui:
         self.log.insert("end", full_msg + "\n")
         self.log.see("end")
         self.log.config(state='disabled')
+
+    def _delayed_moisture_log(self):
+        if self.last_moisture is not None and self.last_sorted_id != "??":
+            self._log_message(f"Moisture: {self.last_moisture}% (measured at camera)")
+        self.pending_moisture_log = None
 
     def _build_statistics_tab(self):
         frm = tk.Frame(self.statistics_tab)
@@ -429,7 +442,7 @@ class ACSSGui:
             if self.serial and self.serial.is_open:
                 print("Serial already open.")
                 return
-            self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)  # Increased timeout to 1s
+            self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
             self._log_message(f"Connected to Arduino on {SERIAL_PORT}@{SERIAL_BAUD}")
             self.serial_reader_thread_obj = threading.Thread(target=self.serial_reader_thread, daemon=True)
             self.serial_reader_thread_obj.start()
@@ -485,48 +498,81 @@ class ACSSGui:
         try:
             while self.serial and self.serial.is_open and self.running:
                 try:
-                    # Read all available lines
                     while self.serial.in_waiting > 0:
                         line = self.serial.readline().decode(errors='ignore').strip()
-                        if line:
-                            print(f"ARDUINO: {line}")
-                            if line.startswith("ACK,AT_CAM"):
-                                # Parse ID from ACK,AT_CAM,idx=...,id=...
-                                parts = line.split(",")
-                                id = None
-                                for part in parts:
-                                    if 'id=' in part:
-                                        id = int(part.split('=')[1])
-                                        break
-                                self.perform_classification(id)
-                            # Commented out: elif line == "TRIG,FLAP_OBJECT_DETECTED":
-                                # self._log_message("Copra detected at flapper, centering for sorting.")
-                            elif line == "ERR,MOTOR_TIMEOUT":
-                                self._log_message("Error: Camera sensor missed object. Check alignment, distance (<10cm), or jump (>27cm).")
-                            elif line.startswith("ERR,FIFO_FULL"):
-                                self._log_message("Error: Arduino queue full. Resetting system.")
-                                self._reset_stats()
-                            elif line.startswith("ACK,CLASS,"):
-                                self._log_message(f"Arduino confirmed classification: {line.split(',')[-1]}")
-                            elif line == "ACK,SORT,L":
-                                self._log_message("Sorted Overcooked (left servo).")
-                            elif line == "ACK,SORT,R":
-                                self._log_message("Sorted Raw (right servo).")
-                            elif line == "ACK,MOTOR,START,2000":
-                                self._log_message("Moving Standard copra (conveyor).")
-                            elif line == "ACK,PING":
-                                print("Arduino responded to PING: Connection alive.")
-                            elif line.startswith("ACK,CLASS_RECEIVED,id="):
-                                self._log_message(f"Classification received by Arduino for id={line.split('=')[-1]}")
-                            elif line.startswith("ACK,CAM_DIST,"):
-                                dist = line.split(",")[-1]
-                                self._log_message(f"Camera US distance: {dist}cm", console_only=True)
-                            elif line == "ERR,CAM_SENSOR_FAIL":
-                                self._log_message("Error: Persistent camera sensor failure. Check wiring/hardware.")
-                                messagebox.showerror("Sensor Error", "Camera ultrasonic sensor failure detected!")
-                            elif line == "ACK,HEARTBEAT":
-                                print("Arduino heartbeat: Connection alive.")
-                    time.sleep(0.01)  # Small sleep to avoid CPU spin
+                        if not line:
+                            continue
+                        print(f"ARDUINO: {line}")
+
+                        # === START US1: Copra detected at entrance ===
+                        if line.startswith("TRIG,START_US1"):
+                            parts = line.split(",")
+                            idx = "??"
+                            cid = "??"
+                            for p in parts:
+                                if "idx=" in p:
+                                    idx = p.split("=")[1]
+                                if "id=" in p:
+                                    cid = p.split("=")[1]
+                            self._log_message(f"Copra detected at Start (US1) → #{cid.zfill(4)} queued (slot {idx})")
+
+                        # === COPRA ARRIVED AT CAMERA ===
+                        elif line.startswith("ACK,AT_CAM"):
+                            parts = line.split(",")
+                            id = None
+                            for part in parts:
+                                if 'id=' in part:
+                                    id = int(part.split('=')[1])
+                                    break
+                            if id is not None:
+                                self._log_message(f"Copra #{id:04d} at Camera → Classifying...")
+                            self.perform_classification(id)
+
+                        # === CLASSIFICATION RECEIVED BY ARDUINO ===
+                        elif line.startswith("ACK,CLASS_RECEIVED,id="):
+                            cid = line.split("=")[-1]
+                            self._log_message(f"Classification received for Copra #{cid}")
+
+                        # === CONVEYOR STARTED → DELAY MOISTURE LOG ===
+                        elif line.startswith("ACK,MOTOR,START"):
+                            parts = line.split(",")
+                            cid = "??"
+                            if len(parts) >= 4 and "id=" in parts[3]:
+                                cid = parts[3].split("=")[1]
+                            self.last_sorted_id = cid
+                            if self.pending_moisture_log:
+                                self.root.after_cancel(self.pending_moisture_log)
+                            self.pending_moisture_log = self.root.after(1000, self._delayed_moisture_log)
+
+                        # === SORTING ACTIONS ===
+                        elif line == "ACK,SORT,L":
+                            self._log_message(f"Sorting Copra #{self.last_sorted_id} → Overcooked (left servo)")
+                        elif line == "ACK,SORT,R":
+                            self._log_message(f"Sorting Copra #{self.last_sorted_id} → Raw (right servo)")
+                        elif line.startswith("ACK,MOTOR,START"):
+                            self._log_message(f"Moving Copra #{self.last_sorted_id} → Standard (conveyor forward)")
+
+                        # === EXISTING MESSAGES ===
+                        elif line == "ERR,MOTOR_TIMEOUT":
+                            self._log_message("Error: Camera sensor missed object. Check alignment/distance.")
+                        elif line.startswith("ERR,FIFO_FULL"):
+                            self._log_message("Error: Arduino queue full. System halted.")
+                            self._reset_stats()
+                        elif line.startswith("ACK,CLASS,"):
+                            cls = line.split(',')[-1]
+                            self._log_message(f"Arduino echoed class: {cls}")
+                        elif line == "ACK,PING":
+                            print("Arduino PING OK")
+                        elif line.startswith("ACK,CAM_DIST,"):
+                            dist = line.split(",")[-1]
+                            self._log_message(f"Camera US distance: {dist}cm", console_only=True)
+                        elif line == "ERR,CAM_SENSOR_FAIL":
+                            self._log_message("Error: Camera sensor failure!")
+                            messagebox.showerror("Hardware Error", "Camera ultrasonic sensor failed!")
+                        elif line == "ACK,HEARTBEAT":
+                            print("Arduino heartbeat OK")
+
+                    time.sleep(0.01)
                 except Exception as e:
                     if not self.serial_error_logged:
                         self._log_message(f"Serial reader error: {e}")
@@ -536,9 +582,12 @@ class ACSSGui:
             self._log_message(f"Serial reader crashed: {outer}")
 
     def perform_classification(self, id=None):
+        if id is None:
+            id = 0
         start_time = time.time()
-        all_candidates = []  # Collect candidates over time
+        all_candidates = []
         num_runs = 0
+
         while time.time() - start_time < CLASSIFICATION_TIMEOUT_S:
             try:
                 with self.frame_lock:
@@ -551,81 +600,71 @@ class ACSSGui:
                     source=frame,
                     persist=True,
                     tracker=TRACKER_PATH,
-                    conf=0.5,  # Increased to 0.5 for fewer false positives
-                    max_det=1,  # Reduced to 1 for faster processing
+                    conf=0.5,
+                    max_det=1,
                     verbose=False
                 )
                 num_runs += 1
 
-                has_detection = results and results[0].boxes and len(results[0].boxes) > 0
-
-                if has_detection:
+                if results and results[0].boxes and len(results[0].boxes) > 0:
                     cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
                     conf_tensor = results[0].boxes.conf.cpu().numpy()
                     for i in range(len(cls_tensor)):
                         cls = cls_tensor[i]
                         conf = conf_tensor[i]
                         if conf > 0.3:
-                            print(f"Detected cls: {cls}, conf: {conf}")  # Log cls for debugging
-                            if cls == 1:  # raw-copra: high moisture
+                            if cls == 1:  # raw-copra
                                 moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
-                            elif cls == 2:  # standard-copra: mid
+                            elif cls == 2:  # standard-copra
                                 moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
-                            else:  # overcooked-copra (0 or unknown): low
+                            else:  # overcooked-copra
                                 moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
                             moisture = round(moisture, 1)
                             all_candidates.append((cls, conf, moisture))
 
-                # Early exit if clear majority (at least 2 runs, one class >=2x others)
                 if len(all_candidates) >= 2:
                     class_counts = Counter([c[0] for c in all_candidates])
                     if class_counts:
                         top_cls, top_count = class_counts.most_common(1)[0]
                         if all(count <= top_count / 2 for cls, count in class_counts.items() if cls != top_cls):
-                            print("Early exit: Clear majority detected")
-                            break  # Exit loop to send now
+                            break
 
-                time.sleep(0.05)  # Reduced for faster looping
-            except Exception as e:
-                print(f"Classification run error: {e}")
                 time.sleep(0.05)
-
-        print(f"Completed {num_runs} YOLO runs in {time.time() - start_time:.2f}s")
+            except Exception as e:
+                print(f"YOLO error: {e}")
+                time.sleep(0.05)
 
         if all_candidates:
             class_counts = Counter([c[0] for c in all_candidates])
             most_common_cls = class_counts.most_common(1)[0][0]
-            # Get highest conf for that cls
             filtered = [c for c in all_candidates if c[0] == most_common_cls]
             filtered.sort(key=lambda x: x[1], reverse=True)
             cls, conf, moisture = filtered[0]
+
             category = self.category_map.get(cls, 'overcooked-copra')
-            class_str = category.upper().replace('-COPRA', '')  # Strip '-copra' to match Arduino's strToClass
-            print(f"Attempting to send classification: {class_str}")
-            success = self.send_cmd(f"{class_str},{id if id is not None else 0}")
-            print(f"Send success: {success}")
+            class_str = category.upper().replace('-COPRA', '')
+
+            self.last_moisture = moisture
+            self.last_sorted_id = f"{id:04d}"
+
+            success = self.send_cmd(f"{class_str},{id}")
             if success:
                 self.copra_counter += 1
-                self._log_message(f"{category.split('-')[0].capitalize()} Copra # {self.copra_counter:04d}")
-                self._log_message(f"Moisture: {moisture}%")
+                cat_name = category.split('-')[0].capitalize()
+                self._log_message(f"Class: {cat_name.upper()}")
                 self.stats[category] += 1
                 self.stats['total'] += 1
                 self.moisture_sums[category] += moisture
                 self.root.after(0, self.update_stats)
             else:
-                self._log_message("Send failed. Retrying once...")
+                self._log_message("Send failed. Retrying...")
                 time.sleep(0.5)
-                success = self.send_cmd(f"{class_str},{id if id is not None else 0}")
-                if success:
-                    # Log success on retry
-                    print("Retry send success")
-                else:
-                    self._log_message("Retry failed. Defaulting to OVERCOOKED.")
-                    self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
+                if not self.send_cmd(f"{class_str},{id}"):
+                    self._log_message("Retry failed → Defaulting to OVERCOOKED")
+                    self.send_cmd(f"OVERCOOKED,{id}")
         else:
-            self._log_message("No detections over time. Defaulting to OVERCOOKED.")
-            print("No candidates found across all runs.")  # Log for debugging
-            self.send_cmd(f"OVERCOOKED,{id if id is not None else 0}")
+            self._log_message("No detection → Defaulting to OVERCOOKED")
+            self.send_cmd(f"OVERCOOKED,{id}")
 
     def start_process(self):
         try:
@@ -710,7 +749,6 @@ class ACSSGui:
                         self.frame_drop_logged = True
                 last_frame_time = current_time
 
-                # Run YOLO inference for live preview (~3 FPS for bounding boxes)
                 if self.yolo and self.frame_counter % YOLO_FRAME_SKIP == 0:
                     results = self.yolo.track(
                         source=frame,
@@ -720,17 +758,15 @@ class ACSSGui:
                         max_det=3,
                         verbose=False
                     )
-                    self.last_results = results  # Persist last results
+                    self.last_results = results
 
-                # Draw persisted bounding boxes if available
                 if self.last_results and self.last_results[0].boxes:
-                    frame = self.last_results[0].plot()  # Draw persisted boxes
+                    frame = self.last_results[0].plot()
 
                 with self.frame_lock:
                     self.latest_frame = frame
                     self.latest_frame_time = current_time
 
-                # Update display
                 display_frame = cv2.resize(frame, CAM_PREVIEW_SIZE)
                 self.update_canvas_with_frame(display_frame)
 
@@ -742,7 +778,7 @@ class ACSSGui:
                     fps_time = current_time
                     frame_counter = 0
 
-                time.sleep(0.02)  # Adjusted for ~3 FPS YOLO updates
+                time.sleep(0.02)
             except Exception as e:
                 self._log_message(f"Camera loop error: {e}")
                 time.sleep(0.2)

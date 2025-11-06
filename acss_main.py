@@ -67,7 +67,7 @@ try:
 except:
     PICAMERA2_AVAILABLE = False
 try:
-    from ultralytics import YOLO
+    from ultralyt ics import YOLO
     ULTRALYTICS_AVAILABLE = True
 except:
     ULTRALYTICS_AVAILABLE = False
@@ -154,6 +154,7 @@ class ACSSGui:
         self.pending_moisture_log = None  # For delayed moisture logging
         self.last_moisture = None
         self.last_sorted_id = "??"
+        self.arduino_default = 'OVERCOOKED'  # Query on start
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -453,6 +454,8 @@ class ACSSGui:
             self.cam_poll_thread = threading.Thread(target=self.cam_dist_poll_loop, daemon=True)
             self.cam_poll_thread.start()
             print("Serial reader, ping, and cam poll threads started.")
+            # Query Arduino default on connect
+            self.send_cmd("GET_DEFAULT")
         except Exception as e:
             self._log_message(f"Failed to connect to Arduino: {e}")
 
@@ -507,7 +510,7 @@ class ACSSGui:
                         print(f"ARDUINO: {line}")
 
                         # === START US1: Copra detected at entrance ===
-                        if line.startswith("TRIG,START_US1"):
+                        if line.startswith("TRIG,START_OBJECT_DETECTED"):
                             parts = line.split(",")
                             idx = "??"
                             cid = "??"
@@ -667,8 +670,8 @@ class ACSSGui:
                     self._log_message("Retry failed → Defaulting to OVERCOOKED")
                     self.send_cmd(f"OVERCOOKED,{id}")
         else:
-            self._log_message("No detection → Defaulting to OVERCOOKED")
-            self.send_cmd(f"OVERCOOKED,{id}")
+            self._log_message("No detection → Sending DEFAULT to Arduino")
+            self.send_cmd(f"DEFAULT,{id}")
 
     def start_process(self):
         try:

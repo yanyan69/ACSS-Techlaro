@@ -39,6 +39,7 @@ Changes:
 # - Logs arrival at camera, classification, delayed moisture, and sorting
 # - Moisture logged 1 second after conveyor starts (ACK,MOTOR,START)
 # - All messages include Copra #ID for perfect queue tracking
+# Update on November 07, 2025: REMOVED ALL POP-UP ERROR WINDOWS. All errors now go to Log only.
 """
 
 import tkinter as tk
@@ -567,8 +568,7 @@ class ACSSGui:
                             dist = line.split(",")[-1]
                             self._log_message(f"Camera US distance: {dist}cm", console_only=True)
                         elif line == "ERR,CAM_SENSOR_FAIL":
-                            self._log_message("Error: Camera sensor failure!")
-                            messagebox.showerror("Hardware Error", "Camera ultrasonic sensor failed!")
+                            self._log_message("CRITICAL: Camera ultrasonic sensor failed! Check wiring/hardware.")
                         elif line == "ACK,HEARTBEAT":
                             print("Arduino heartbeat OK")
 

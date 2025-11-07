@@ -40,7 +40,8 @@ Changes:
 # - Moisture logged 1 second after conveyor starts (ACK,MOTOR,START)
 # - All messages include Copra #ID for perfect queue tracking
 # Update on November 07, 2025: REMOVED ALL POP-UP ERROR WINDOWS. All errors now go to Log only.
-# Update on November 07, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.0s and sleep to 0.02s for faster send. Added handling for ERR,MISSED_CAM in log. Tied moisture delay to ACK,CLASS_RECEIVED. Synced default fallback with Arduino (query on start). Made no-detection send 'DEFAULT' to use Arduino's config. 
+# Update on November 07, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.0s and sleep to 0.02s for faster send. Added handling for ERR,MISSED_CAM in log. Tied moisture delay to ACK,CLASS_RECEIVED. Synced default fallback with Arduino (query on start). 
+# Update on November 08, 2025: Increased CLASSIFICATION_TIMEOUT_S to 4.0s and sleep to 0.05s for better sync. Added 3x retry in send_cmd. Added MOISTURE_LOG_DELAY_MS constant. Removed extra text from moisture log. Lowered conf to 0.5 in perform_classification. Updated serial parsing for id= in ACK,MOTOR,START and ACK,SORT,L/R. Added handling for ERR,SYSTEM_PAUSED. Added no-candidates warning in perform_classification.
 """
 
 import tkinter as tk
@@ -84,12 +85,13 @@ SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"
-CLASSIFICATION_TIMEOUT_S = 1.0  # Reduced to send faster
+CLASSIFICATION_TIMEOUT_S = 4.0  # Increased for better sync
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
+MOISTURE_LOG_DELAY_MS = 1000  # Adjustable constant for moisture log delay
 
 # ---------------------------------------------------
 
@@ -277,7 +279,7 @@ class ACSSGui:
 
     def _delayed_moisture_log(self):
         if self.last_moisture is not None and self.last_sorted_id != "??":
-            self._log_message(f"Moisture: {self.last_moisture}% (measured at camera)")
+            self._log_message(f"Moisture: {self.last_moisture}%")
         self.pending_moisture_log = None
 
     def _build_statistics_tab(self):
@@ -468,23 +470,27 @@ class ACSSGui:
         except Exception as e:
             self._log_message(f"Error closing serial: {e}")
 
-    def send_cmd(self, text):
-        try:
-            if not self.serial or not self.serial.is_open:
-                self._log_message(f"Serial not open — can't send: {text}")
-                return False
-            checksum = 0
-            for char in text:
-                checksum ^= ord(char)
-            full_cmd = (text.strip().upper() + f"|{checksum}\n").encode('utf-8')
-            with self.serial_lock:
-                self.serial.write(full_cmd)
-                self.serial.flush()
-            print(f"Sent to Arduino: {text} with checksum {checksum}")
-            return True
-        except Exception as e:
-            self._log_message(f"Failed to send command '{text}': {e}")
-            return False
+    def send_cmd(self, text, retries=3):
+        attempt = 0
+        while attempt < retries:
+            try:
+                if not self.serial or not self.serial.is_open:
+                    self._log_message(f"Serial not open — can't send: {text}")
+                    return False
+                checksum = 0
+                for char in text:
+                    checksum ^= ord(char)
+                full_cmd = (text.strip().upper() + f"|{checksum}\n").encode('utf-8')
+                with self.serial_lock:
+                    self.serial.write(full_cmd)
+                    self.serial.flush()
+                print(f"Sent to Arduino: {text} with checksum {checksum}")
+                return True
+            except Exception as e:
+                self._log_message(f"Failed to send command '{text}' (attempt {attempt+1}): {e}")
+                attempt += 1
+                time.sleep(0.5)
+        return False
 
     def ping_loop(self):
         while self.running and self.serial and self.serial.is_open:
@@ -537,26 +543,41 @@ class ACSSGui:
                         elif line.startswith("ACK,CLASS_RECEIVED,id="):
                             cid = line.split("=")[-1]
                             self._log_message(f"Classification received for Copra #{cid}")
-                            self.root.after(1000, self._delayed_moisture_log)  # Delay moisture after receipt
+                            self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)  # Delay moisture after receipt
 
                         # === CONVEYOR STARTED → DELAY MOISTURE LOG ===
                         elif line.startswith("ACK,MOTOR,START"):
                             parts = line.split(",")
                             cid = "??"
-                            if len(parts) >= 4 and "id=" in parts[3]:
-                                cid = parts[3].split("=")[1]
+                            for p in parts:
+                                if "id=" in p:
+                                    cid = p.split("=")[1]
+                                    break
                             self.last_sorted_id = cid
                             if self.pending_moisture_log:
                                 self.root.after_cancel(self.pending_moisture_log)
-                            self.pending_moisture_log = self.root.after(1000, self._delayed_moisture_log)
+                            self.pending_moisture_log = self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)
+                            self._log_message(f"Moving Copra #{self.last_sorted_id} → Standard (conveyor forward)")
 
                         # === SORTING ACTIONS ===
-                        elif line == "ACK,SORT,L":
+                        elif line.startswith("ACK,SORT,L"):
+                            parts = line.split(",")
+                            cid = "??"
+                            for p in parts:
+                                if "id=" in p:
+                                    cid = p.split("=")[1]
+                                    break
+                            self.last_sorted_id = cid
                             self._log_message(f"Sorting Copra #{self.last_sorted_id} → Overcooked (left servo)")
-                        elif line == "ACK,SORT,R":
+                        elif line.startswith("ACK,SORT,R"):
+                            parts = line.split(",")
+                            cid = "??"
+                            for p in parts:
+                                if "id=" in p:
+                                    cid = p.split("=")[1]
+                                    break
+                            self.last_sorted_id = cid
                             self._log_message(f"Sorting Copra #{self.last_sorted_id} → Raw (right servo)")
-                        elif line.startswith("ACK,MOTOR,START"):
-                            self._log_message(f"Moving Copra #{self.last_sorted_id} → Standard (conveyor forward)")
 
                         # === EXISTING MESSAGES ===
                         elif line == "ERR,MOTOR_TIMEOUT":
@@ -578,6 +599,9 @@ class ACSSGui:
                             print("Arduino heartbeat OK")
                         elif line == "ERR,MISSED_CAM":
                             self._log_message("Missed camera detection – check sensor/copra alignment")
+                        elif line == "ERR,SYSTEM_PAUSED":
+                            self._log_message("CRITICAL: Arduino system paused due to errors. Reset required.")
+                            self.stop_process()
 
                     time.sleep(0.01)
                 except Exception as e:
@@ -599,7 +623,7 @@ class ACSSGui:
             try:
                 with self.frame_lock:
                     if self.latest_frame is None:
-                        time.sleep(0.02)
+                        time.sleep(0.05)
                         continue
                     frame = self.latest_frame.copy()
 
@@ -607,7 +631,7 @@ class ACSSGui:
                     source=frame,
                     persist=True,
                     tracker=TRACKER_PATH,
-                    conf=0.6,
+                    conf=0.5,  # Lowered for fewer misses
                     max_det=1,
                     verbose=False
                 )
@@ -636,10 +660,10 @@ class ACSSGui:
                         if all(count <= top_count / 2 for cls, count in class_counts.items() if cls != top_cls):
                             break
 
-                time.sleep(0.02)  # Reduced for faster send
+                time.sleep(0.05)  # Increased for stability
             except Exception as e:
                 print(f"YOLO error: {e}")
-                time.sleep(0.02)
+                time.sleep(0.05)
 
         if all_candidates:
             class_counts = Counter([c[0] for c in all_candidates])
@@ -664,13 +688,10 @@ class ACSSGui:
                 self.moisture_sums[category] += moisture
                 self.root.after(0, self.update_stats)
             else:
-                self._log_message("Send failed. Retrying...")
-                time.sleep(0.5)
-                if not self.send_cmd(f"{class_str},{id}"):
-                    self._log_message("Retry failed → Defaulting to OVERCOOKED")
-                    self.send_cmd(f"OVERCOOKED,{id}")
+                self._log_message("All send retries failed → Defaulting to OVERCOOKED")
+                self.send_cmd(f"OVERCOOKED,{id}")
         else:
-            self._log_message("No detection → Sending DEFAULT to Arduino")
+            self._log_message("No detection after retries → Sending DEFAULT to Arduino")
             self.send_cmd(f"DEFAULT,{id}")
 
     def start_process(self):

@@ -42,7 +42,7 @@ Changes:
 # Update on November 07, 2025: REMOVED ALL POP-UP ERROR WINDOWS. All errors now go to Log only.
 # Update on November 07, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.0s and sleep to 0.02s for faster send. Added handling for ERR,MISSED_CAM in log. Tied moisture delay to ACK,CLASS_RECEIVED. Synced default fallback with Arduino (query on start). 
 # Update on November 08, 2025: Increased CLASSIFICATION_TIMEOUT_S to 4.0s and sleep to 0.05s for better sync. Added 3x retry in send_cmd. Added MOISTURE_LOG_DELAY_MS constant. Removed extra text from moisture log. Lowered conf to 0.5 in perform_classification. Updated serial parsing for id= in ACK,MOTOR,START and ACK,SORT,L/R. Added handling for ERR,SYSTEM_PAUSED. Added no-candidates warning in perform_classification.
-# Update on November 09, 2025: Moved detection log to ACK,ENQUEUE_PLACEHOLDER for proper ID/idx. Made conveyor start log generic (no "to Standard" assumption). Added moisture_logged_ids set to prevent duplicate moisture logs per ID. Reset set in _reset_stats.
+# Update on November 08, 2025: Moved start detection log to ACK,ENQUEUE_PLACEHOLDER for correct idx/id parsing. Ignore ACK,MOTOR,START if id=-1 (ghost). Added warning if sent class not matched in ACK,CLASS_RECEIVED.
 """
 
 import tkinter as tk
@@ -158,7 +158,8 @@ class ACSSGui:
         self.last_moisture = None
         self.last_sorted_id = "??"
         self.arduino_default = 'OVERCOOKED'  # Query on start
-        self.moisture_logged_ids = set()  # To prevent duplicate moisture logs per ID
+        self.last_sent_class = None  # For sync check
+        self.last_sent_id = None
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -280,9 +281,8 @@ class ACSSGui:
         self.log.config(state='disabled')
 
     def _delayed_moisture_log(self):
-        if self.last_moisture is not None and self.last_sorted_id != "??" and self.last_sorted_id not in self.moisture_logged_ids:
+        if self.last_moisture is not None and self.last_sorted_id != "??":
             self._log_message(f"Moisture: {self.last_moisture}%")
-            self.moisture_logged_ids.add(self.last_sorted_id)
         self.pending_moisture_log = None
 
     def _build_statistics_tab(self):
@@ -340,7 +340,6 @@ class ACSSGui:
         self.stats['start_time'] = None
         self.stats['end_time'] = None
         self.copra_counter = 0
-        self.moisture_logged_ids.clear()
         self.update_stats()
         self._log_message("Statistics and Arduino state reset.")
 
@@ -519,7 +518,7 @@ class ACSSGui:
                             continue
                         print(f"ARDUINO: {line}")
 
-                        # === COPRA DETECTED AND QUEUED ===
+                        # === START US1: Copra detected at entrance ===
                         if line.startswith("ACK,ENQUEUE_PLACEHOLDER"):
                             parts = line.split(",")
                             idx = "??"
@@ -547,6 +546,9 @@ class ACSSGui:
                         elif line.startswith("ACK,CLASS_RECEIVED,id="):
                             cid = line.split("=")[-1]
                             self._log_message(f"Classification received for Copra #{cid}")
+                            if self.last_sent_id == cid and self.last_sent_class:
+                                if not line.lower().find(self.last_sent_class.lower()) > -1:
+                                    self._log_message(f"Warning: Sent class {self.last_sent_class} for ID {cid} not matched in echo.")
                             self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)  # Delay moisture after receipt
 
                         # === CONVEYOR STARTED → DELAY MOISTURE LOG ===
@@ -557,11 +559,13 @@ class ACSSGui:
                                 if "id=" in p:
                                     cid = p.split("=")[1]
                                     break
+                            if cid == "-1":
+                                continue  # Ignore ghost/test moves
                             self.last_sorted_id = cid
                             if self.pending_moisture_log:
                                 self.root.after_cancel(self.pending_moisture_log)
                             self.pending_moisture_log = self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)
-                            self._log_message(f"Conveyor starting for Copra #{self.last_sorted_id.zfill(4)}")
+                            self._log_message(f"Moving Copra #{self.last_sorted_id} → Standard (conveyor forward)")
 
                         # === SORTING ACTIONS ===
                         elif line.startswith("ACK,SORT,L"):
@@ -571,8 +575,10 @@ class ACSSGui:
                                 if "id=" in p:
                                     cid = p.split("=")[1]
                                     break
+                            if cid == "-1":
+                                continue
                             self.last_sorted_id = cid
-                            self._log_message(f"Sorting Copra #{self.last_sorted_id.zfill(4)} → Overcooked (left servo)")
+                            self._log_message(f"Sorting Copra #{self.last_sorted_id} → Overcooked (left servo)")
                         elif line.startswith("ACK,SORT,R"):
                             parts = line.split(",")
                             cid = "??"
@@ -580,8 +586,10 @@ class ACSSGui:
                                 if "id=" in p:
                                     cid = p.split("=")[1]
                                     break
+                            if cid == "-1":
+                                continue
                             self.last_sorted_id = cid
-                            self._log_message(f"Sorting Copra #{self.last_sorted_id.zfill(4)} → Raw (right servo)")
+                            self._log_message(f"Sorting Copra #{self.last_sorted_id} → Raw (right servo)")
 
                         # === EXISTING MESSAGES ===
                         elif line == "ERR,MOTOR_TIMEOUT":
@@ -681,6 +689,8 @@ class ACSSGui:
 
             self.last_moisture = moisture
             self.last_sorted_id = f"{id:04d}"
+            self.last_sent_class = class_str
+            self.last_sent_id = str(id)
 
             success = self.send_cmd(f"{class_str},{id}")
             if success:

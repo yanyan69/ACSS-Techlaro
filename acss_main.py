@@ -42,6 +42,7 @@ Changes:
 # Update on November 07, 2025: REMOVED ALL POP-UP ERROR WINDOWS. All errors now go to Log only.
 # Update on November 07, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.0s and sleep to 0.02s for faster send. Added handling for ERR,MISSED_CAM in log. Tied moisture delay to ACK,CLASS_RECEIVED. Synced default fallback with Arduino (query on start). 
 # Update on November 08, 2025: Increased CLASSIFICATION_TIMEOUT_S to 4.0s and sleep to 0.05s for better sync. Added 3x retry in send_cmd. Added MOISTURE_LOG_DELAY_MS constant. Removed extra text from moisture log. Lowered conf to 0.5 in perform_classification. Updated serial parsing for id= in ACK,MOTOR,START and ACK,SORT,L/R. Added handling for ERR,SYSTEM_PAUSED. Added no-candidates warning in perform_classification.
+# Update on November 09, 2025: Moved detection log to ACK,ENQUEUE_PLACEHOLDER for proper ID/idx. Made conveyor start log generic (no "to Standard" assumption). Added moisture_logged_ids set to prevent duplicate moisture logs per ID. Reset set in _reset_stats.
 """
 
 import tkinter as tk
@@ -91,7 +92,7 @@ PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
-MOISTURE_LOG_DELAY_MS = 5000  # Adjustable constant for moisture log delay
+MOISTURE_LOG_DELAY_MS = 1000  # Adjustable constant for moisture log delay
 
 # ---------------------------------------------------
 
@@ -157,6 +158,7 @@ class ACSSGui:
         self.last_moisture = None
         self.last_sorted_id = "??"
         self.arduino_default = 'OVERCOOKED'  # Query on start
+        self.moisture_logged_ids = set()  # To prevent duplicate moisture logs per ID
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -278,8 +280,9 @@ class ACSSGui:
         self.log.config(state='disabled')
 
     def _delayed_moisture_log(self):
-        if self.last_moisture is not None and self.last_sorted_id != "??":
+        if self.last_moisture is not None and self.last_sorted_id != "??" and self.last_sorted_id not in self.moisture_logged_ids:
             self._log_message(f"Moisture: {self.last_moisture}%")
+            self.moisture_logged_ids.add(self.last_sorted_id)
         self.pending_moisture_log = None
 
     def _build_statistics_tab(self):
@@ -337,6 +340,7 @@ class ACSSGui:
         self.stats['start_time'] = None
         self.stats['end_time'] = None
         self.copra_counter = 0
+        self.moisture_logged_ids.clear()
         self.update_stats()
         self._log_message("Statistics and Arduino state reset.")
 
@@ -515,8 +519,8 @@ class ACSSGui:
                             continue
                         print(f"ARDUINO: {line}")
 
-                        # === START US1: Copra detected at entrance ===
-                        if line.startswith("TRIG,START_OBJECT_DETECTED"):
+                        # === COPRA DETECTED AND QUEUED ===
+                        if line.startswith("ACK,ENQUEUE_PLACEHOLDER"):
                             parts = line.split(",")
                             idx = "??"
                             cid = "??"
@@ -557,7 +561,7 @@ class ACSSGui:
                             if self.pending_moisture_log:
                                 self.root.after_cancel(self.pending_moisture_log)
                             self.pending_moisture_log = self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)
-                            self._log_message(f"Moving Copra #{self.last_sorted_id} → Standard (conveyor forward)")
+                            self._log_message(f"Conveyor starting for Copra #{self.last_sorted_id.zfill(4)}")
 
                         # === SORTING ACTIONS ===
                         elif line.startswith("ACK,SORT,L"):
@@ -568,7 +572,7 @@ class ACSSGui:
                                     cid = p.split("=")[1]
                                     break
                             self.last_sorted_id = cid
-                            self._log_message(f"Sorting Copra #{self.last_sorted_id} → Overcooked (left servo)")
+                            self._log_message(f"Sorting Copra #{self.last_sorted_id.zfill(4)} → Overcooked (left servo)")
                         elif line.startswith("ACK,SORT,R"):
                             parts = line.split(",")
                             cid = "??"
@@ -577,7 +581,7 @@ class ACSSGui:
                                     cid = p.split("=")[1]
                                     break
                             self.last_sorted_id = cid
-                            self._log_message(f"Sorting Copra #{self.last_sorted_id} → Raw (right servo)")
+                            self._log_message(f"Sorting Copra #{self.last_sorted_id.zfill(4)} → Raw (right servo)")
 
                         # === EXISTING MESSAGES ===
                         elif line == "ERR,MOTOR_TIMEOUT":

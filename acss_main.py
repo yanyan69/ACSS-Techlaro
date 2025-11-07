@@ -91,7 +91,7 @@ PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
-MOISTURE_LOG_DELAY_MS = 1000  # Adjustable constant for moisture log delay
+MOISTURE_LOG_DELAY_MS = 5000  # Adjustable constant for moisture log delay
 
 # ---------------------------------------------------
 

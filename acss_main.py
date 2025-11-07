@@ -43,7 +43,6 @@ Changes:
 # Update on November 07, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.0s and sleep to 0.02s for faster send. Added handling for ERR,MISSED_CAM in log. Tied moisture delay to ACK,CLASS_RECEIVED. Synced default fallback with Arduino (query on start). 
 # Update on November 08, 2025: Increased CLASSIFICATION_TIMEOUT_S to 4.0s and sleep to 0.05s for better sync. Added 3x retry in send_cmd. Added MOISTURE_LOG_DELAY_MS constant. Removed extra text from moisture log. Lowered conf to 0.5 in perform_classification. Updated serial parsing for id= in ACK,MOTOR,START and ACK,SORT,L/R. Added handling for ERR,SYSTEM_PAUSED. Added no-candidates warning in perform_classification.
 # Update on November 09, 2025: Ignored test logs (id==-1 in ACK,MOTOR,START/SORT). Set last_moisture=None after log to prevent repeats. Moved queued log to ACK,ENQUEUE_PLACEHOLDER. Simplified TRIG,START_OBJECT_DETECTED. Updated ACK,CLASS, parsing for cls/id/note.
-# Update on November 09, 2025: Added GET_FLAP_DIST polling. Renamed cam_poll_thread to sensor_poll_thread. Handled ACK,FLAP_DIST logging. Updated ERR,MOTOR_TIMEOUT message to "Error: Motor timeout - missed sensor detection. Check alignment/timings." for clarity. Added zfill(4) to last_sorted_id for consistent #0001 formatting.
 """
 
 import tkinter as tk
@@ -92,7 +91,7 @@ MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
-SENSOR_POLL_INTERVAL_S = 10.0  # Poll sensor dist every 10s
+CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
 MOISTURE_LOG_DELAY_MS = 5000  # Adjustable constant for moisture log delay
 
 # ---------------------------------------------------
@@ -132,7 +131,7 @@ class ACSSGui:
         self.running = True
         self.camera_thread = None
         self.ping_thread = None
-        self.sensor_poll_thread = None
+        self.cam_poll_thread = None
         self.picam2 = None
         self.yolo = None
         self.frame_lock = threading.Lock()
@@ -456,9 +455,9 @@ class ACSSGui:
             self.serial_reader_thread_obj.start()
             self.ping_thread = threading.Thread(target=self.ping_loop, daemon=True)
             self.ping_thread.start()
-            self.sensor_poll_thread = threading.Thread(target=self.sensor_poll_loop, daemon=True)
-            self.sensor_poll_thread.start()
-            print("Serial reader, ping, and sensor poll threads started.")
+            self.cam_poll_thread = threading.Thread(target=self.cam_dist_poll_loop, daemon=True)
+            self.cam_poll_thread.start()
+            print("Serial reader, ping, and cam poll threads started.")
             # Query Arduino default on connect
             self.send_cmd("GET_DEFAULT")
         except Exception as e:
@@ -502,11 +501,10 @@ class ACSSGui:
                 self.last_ping_time = time.time()
             time.sleep(0.5)
 
-    def sensor_poll_loop(self):
+    def cam_dist_poll_loop(self):
         while self.running and self.serial and self.serial.is_open:
             self.send_cmd("GET_CAM_DIST")
-            self.send_cmd("GET_FLAP_DIST")
-            time.sleep(SENSOR_POLL_INTERVAL_S)
+            time.sleep(CAM_DIST_POLL_INTERVAL_S)
 
     def serial_reader_thread(self):
         print("Serial reader started.")
@@ -563,7 +561,7 @@ class ACSSGui:
                                     break
                             if cid == "-1":
                                 continue  # Skip test logs
-                            self.last_sorted_id = cid.zfill(4)
+                            self.last_sorted_id = cid
                             if self.pending_moisture_log:
                                 self.root.after_cancel(self.pending_moisture_log)
                             self.pending_moisture_log = self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)
@@ -579,7 +577,7 @@ class ACSSGui:
                                     break
                             if cid == "-1":
                                 continue  # Skip test logs
-                            self.last_sorted_id = cid.zfill(4)
+                            self.last_sorted_id = cid
                             self._log_message(f"Sorting Copra #{self.last_sorted_id} → Overcooked (left servo)")
                         elif line.startswith("ACK,SORT,R"):
                             parts = line.split(",")
@@ -590,7 +588,7 @@ class ACSSGui:
                                     break
                             if cid == "-1":
                                 continue  # Skip test logs
-                            self.last_sorted_id = cid.zfill(4)
+                            self.last_sorted_id = cid
                             self._log_message(f"Sorting Copra #{self.last_sorted_id} → Raw (right servo)")
 
                         # === ECHOED CLASS ===
@@ -610,7 +608,7 @@ class ACSSGui:
 
                         # === EXISTING MESSAGES ===
                         elif line == "ERR,MOTOR_TIMEOUT":
-                            self._log_message("Error: Motor timeout - missed sensor detection. Check alignment/timings.")
+                            self._log_message("Error: Camera sensor missed object. Check alignment/distance.")
                         elif line.startswith("ERR,FIFO_FULL"):
                             self._log_message("Error: Arduino queue full. System halted.")
                             self._reset_stats()
@@ -619,9 +617,6 @@ class ACSSGui:
                         elif line.startswith("ACK,CAM_DIST,"):
                             dist = line.split(",")[-1]
                             self._log_message(f"Camera US distance: {dist}cm", console_only=True)
-                        elif line.startswith("ACK,FLAP_DIST,"):
-                            dist = line.split(",")[-1]
-                            self._log_message(f"Flapper US distance: {dist}cm", console_only=True)
                         elif line == "ERR,CAM_SENSOR_FAIL":
                             self._log_message("CRITICAL: Camera ultrasonic sensor failed! Check wiring/hardware.")
                         elif line == "ACK,HEARTBEAT":

@@ -42,6 +42,7 @@ Changes:
 # Update on November 07, 2025: REMOVED ALL POP-UP ERROR WINDOWS. All errors now go to Log only.
 # Update on November 07, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.0s and sleep to 0.02s for faster send. Added handling for ERR,MISSED_CAM in log. Tied moisture delay to ACK,CLASS_RECEIVED. Synced default fallback with Arduino (query on start). 
 # Update on November 08, 2025: Increased CLASSIFICATION_TIMEOUT_S to 4.0s and sleep to 0.05s for better sync. Added 3x retry in send_cmd. Added MOISTURE_LOG_DELAY_MS constant. Removed extra text from moisture log. Lowered conf to 0.5 in perform_classification. Updated serial parsing for id= in ACK,MOTOR,START and ACK,SORT,L/R. Added handling for ERR,SYSTEM_PAUSED. Added no-candidates warning in perform_classification.
+# Update on November 09, 2025: Ignored test logs (id==-1 in ACK,MOTOR,START/SORT). Set last_moisture=None after log to prevent repeats. Moved queued log to ACK,ENQUEUE_PLACEHOLDER. Simplified TRIG,START_OBJECT_DETECTED. Updated ACK,CLASS, parsing for cls/id/note.
 """
 
 import tkinter as tk
@@ -280,6 +281,7 @@ class ACSSGui:
     def _delayed_moisture_log(self):
         if self.last_moisture is not None and self.last_sorted_id != "??":
             self._log_message(f"Moisture: {self.last_moisture}%")
+            self.last_moisture = None  # Reset to prevent repeats
         self.pending_moisture_log = None
 
     def _build_statistics_tab(self):
@@ -517,6 +519,10 @@ class ACSSGui:
 
                         # === START US1: Copra detected at entrance ===
                         if line.startswith("TRIG,START_OBJECT_DETECTED"):
+                            self._log_message("Copra detected at Start (US1)")
+
+                        # === ENQUEUE CONFIRM ===
+                        elif line.startswith("ACK,ENQUEUE_PLACEHOLDER"):
                             parts = line.split(",")
                             idx = "??"
                             cid = "??"
@@ -525,7 +531,7 @@ class ACSSGui:
                                     idx = p.split("=")[1]
                                 if "id=" in p:
                                     cid = p.split("=")[1]
-                            self._log_message(f"Copra detected at Start (US1) → #{cid.zfill(4)} queued (slot {idx})")
+                            self._log_message(f"#{cid.zfill(4)} queued (slot {idx})")
 
                         # === COPRA ARRIVED AT CAMERA ===
                         elif line.startswith("ACK,AT_CAM"):
@@ -553,6 +559,8 @@ class ACSSGui:
                                 if "id=" in p:
                                     cid = p.split("=")[1]
                                     break
+                            if cid == "-1":
+                                continue  # Skip test logs
                             self.last_sorted_id = cid
                             if self.pending_moisture_log:
                                 self.root.after_cancel(self.pending_moisture_log)
@@ -567,6 +575,8 @@ class ACSSGui:
                                 if "id=" in p:
                                     cid = p.split("=")[1]
                                     break
+                            if cid == "-1":
+                                continue  # Skip test logs
                             self.last_sorted_id = cid
                             self._log_message(f"Sorting Copra #{self.last_sorted_id} → Overcooked (left servo)")
                         elif line.startswith("ACK,SORT,R"):
@@ -576,8 +586,25 @@ class ACSSGui:
                                 if "id=" in p:
                                     cid = p.split("=")[1]
                                     break
+                            if cid == "-1":
+                                continue  # Skip test logs
                             self.last_sorted_id = cid
                             self._log_message(f"Sorting Copra #{self.last_sorted_id} → Raw (right servo)")
+
+                        # === ECHOED CLASS ===
+                        elif line.startswith("ACK,CLASS,"):
+                            parts = line.split(",")
+                            cls = parts[2]
+                            extra = ""
+                            if len(parts) > 3:
+                                if "id=" in parts[3]:
+                                    extra = f" for id={parts[3].split('=')[1]}"
+                                else:
+                                    extra = f" {','.join(parts[3:])}"
+                            elif " (" in cls:
+                                cls, note = cls.split(" (", 1)
+                                extra = f" ({note}"
+                            self._log_message(f"Arduino echoed class: {cls}{extra}")
 
                         # === EXISTING MESSAGES ===
                         elif line == "ERR,MOTOR_TIMEOUT":
@@ -585,9 +612,6 @@ class ACSSGui:
                         elif line.startswith("ERR,FIFO_FULL"):
                             self._log_message("Error: Arduino queue full. System halted.")
                             self._reset_stats()
-                        elif line.startswith("ACK,CLASS,"):
-                            cls = line.split(',')[-1]
-                            self._log_message(f"Arduino echoed class: {cls}")
                         elif line == "ACK,PING":
                             print("Arduino PING OK")
                         elif line.startswith("ACK,CAM_DIST,"):

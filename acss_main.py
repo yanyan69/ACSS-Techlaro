@@ -43,6 +43,7 @@ Changes:
 # Update on November 07, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.0s and sleep to 0.02s for faster send. Added handling for ERR,MISSED_CAM in log. Tied moisture delay to ACK,CLASS_RECEIVED. Synced default fallback with Arduino (query on start). 
 # Update on November 08, 2025: Increased CLASSIFICATION_TIMEOUT_S to 4.0s and sleep to 0.05s for better sync. Added 3x retry in send_cmd. Added MOISTURE_LOG_DELAY_MS constant. Removed extra text from moisture log. Lowered conf to 0.5 in perform_classification. Updated serial parsing for id= in ACK,MOTOR,START and ACK,SORT,L/R. Added handling for ERR,SYSTEM_PAUSED. Added no-candidates warning in perform_classification.
 # Update on November 08, 2025: Moved start detection log to ACK,ENQUEUE_PLACEHOLDER for correct idx/id parsing. Ignore ACK,MOTOR,START if id=-1 (ghost). Added warning if sent class not matched in ACK,CLASS_RECEIVED.
+# Update on November 08, 2025: Fixed class echo parsing in serial_reader_thread to correctly extract class and ID from "ACK,CLASS,...". Moved mismatch warning to this block for accurate checking. Cleaned class string for consistency.
 """
 
 import tkinter as tk
@@ -92,7 +93,7 @@ PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 2  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
-MOISTURE_LOG_DELAY_MS = 1000  # Adjustable constant for moisture log delay
+MOISTURE_LOG_DELAY_MS = 5000  # Adjustable constant for moisture log delay
 
 # ---------------------------------------------------
 
@@ -546,9 +547,6 @@ class ACSSGui:
                         elif line.startswith("ACK,CLASS_RECEIVED,id="):
                             cid = line.split("=")[-1]
                             self._log_message(f"Classification received for Copra #{cid}")
-                            if self.last_sent_id == cid and self.last_sent_class:
-                                if not line.lower().find(self.last_sent_class.lower()) > -1:
-                                    self._log_message(f"Warning: Sent class {self.last_sent_class} for ID {cid} not matched in echo.")
                             self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)  # Delay moisture after receipt
 
                         # === CONVEYOR STARTED → DELAY MOISTURE LOG ===
@@ -591,15 +589,39 @@ class ACSSGui:
                             self.last_sorted_id = cid
                             self._log_message(f"Sorting Copra #{self.last_sorted_id} → Raw (right servo)")
 
+                        # === CLASS ECHO FROM ARDUINO ===
+                        elif line.startswith("ACK,CLASS,"):
+                            parts = line.split(',')
+                            if len(parts) >= 3:
+                                cls = parts[2]
+                                remaining = ','.join(parts[3:])
+                                cid = "??"
+                                extra = ""
+                                if 'id=' in remaining:
+                                    id_part = remaining.split('id=')[1]
+                                    cid = id_part.split()[0]  # Take until space for extras like "(default ...)"
+                                    extra = remaining.replace(f",id={cid}", "")
+                                elif ' (' in remaining:  # For extras like "(default failsafe)"
+                                    extra = remaining
+                                else:
+                                    cid = None
+                                cls = cls.strip().upper().replace('-COPRA', '')  # Clean for consistency
+                                log_msg = f"Arduino echoed class: {cls}"
+                                if cid != "??":
+                                    log_msg += f",id={cid}"
+                                if extra:
+                                    log_msg += f" {extra}"
+                                self._log_message(log_msg)
+                                if cid != "??" and self.last_sent_id == cid and self.last_sent_class:
+                                    if self.last_sent_class.lower() not in cls.lower():
+                                        self._log_message(f"Warning: Sent class {self.last_sent_class} for ID {cid} not matched in echo.")
+
                         # === EXISTING MESSAGES ===
                         elif line == "ERR,MOTOR_TIMEOUT":
                             self._log_message("Error: Camera sensor missed object. Check alignment/distance.")
                         elif line.startswith("ERR,FIFO_FULL"):
                             self._log_message("Error: Arduino queue full. System halted.")
                             self._reset_stats()
-                        elif line.startswith("ACK,CLASS,"):
-                            cls = line.split(',')[-1]
-                            self._log_message(f"Arduino echoed class: {cls}")
                         elif line == "ACK,PING":
                             print("Arduino PING OK")
                         elif line.startswith("ACK,CAM_DIST,"):

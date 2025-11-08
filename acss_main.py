@@ -49,6 +49,7 @@ Changes:
 # Update on November 08, 2025: Moved moisture logging to immediately after classification in perform_classification (no delay, prints right after "Class: ..."). Removed delayed logging and related vars/scheduling. Rounded moisture to 2 decimals based on research (raw: 7.1-60%, standard: 6-7%, overcooked: 4-5.9%).
 # Update on November 08, 2025: Adjusted copra # display to start from 1 (offset Arduino ID by +1 in logs). Added constant MOISTURE_PRINT_DELAY_MS = 2000 (2s delay after class log for moisture print). Scheduled moisture log with root.after for safe, non-disruptive delay.
 # Update on November 08, 2025: Added iou=0.45 to YOLO track calls in perform_classification and camera_loop to reduce overlapping bounding boxes via stricter NMS.
+# Update on November 08, 2025: Enforced minimum 1s stabilization in perform_classification before sending command by looping inferences until at least 1s elapsed or consensus reached.
 """
 
 import tkinter as tk
@@ -657,8 +658,9 @@ class ACSSGui:
         start_time = time.time()
         all_candidates = []
         num_runs = 0
+        min_stabilization_time = 1.0  # Minimum time to stabilize (1s)
 
-        while time.time() - start_time < CLASSIFICATION_TIMEOUT_S and num_runs < 5:  # Limit max runs for speed
+        while time.time() - start_time < CLASSIFICATION_TIMEOUT_S and num_runs < 20:  # Increased max runs for stabilization
             try:
                 with self.frame_lock:
                     if self.latest_frame is None:
@@ -698,12 +700,17 @@ class ACSSGui:
                     if class_counts:
                         top_cls, top_count = class_counts.most_common(1)[0]
                         if all(count <= top_count / 2 for cls, count in class_counts.items() if cls != top_cls):
-                            break
+                            if time.time() - start_time >= min_stabilization_time:
+                                break  # Consensus reached after min time
 
                 time.sleep(0.05)  # Increased for stability
             except Exception as e:
                 print(f"YOLO error: {e}")
                 time.sleep(0.05)
+
+        # Enforce min time if not reached
+        while time.time() - start_time < min_stabilization_time:
+            time.sleep(0.01)
 
         if all_candidates:
             class_counts = Counter([c[0] for c in all_candidates])

@@ -242,14 +242,26 @@ class ACSSGui:
         self.log = scrolledtext.ScrolledText(log_frame, state='disabled', wrap='word', height=20, width=40)
         self.log.pack(fill='both', expand=True)
 
-        # Clear Log button
-        clear_log_btn = tk.Button(log_frame, text="Clear Log", command=self._clear_log)
-        clear_log_btn.pack(pady=5)
+        # Button frame for Clear and Copy Log buttons
+        button_frame = tk.Frame(log_frame)
+        button_frame.pack(pady=5)
+
+        clear_log_btn = tk.Button(button_frame, text="Clear Log", command=self._clear_log)
+        clear_log_btn.pack(side=tk.LEFT, padx=5)
+
+        copy_log_btn = tk.Button(button_frame, text="Copy Log", command=self._copy_log)
+        copy_log_btn.pack(side=tk.LEFT, padx=5)
 
     def _clear_log(self):
         self.log.config(state='normal')
         self.log.delete('1.0', tk.END)
         self.log.config(state='disabled')
+
+    def _copy_log(self):
+        text = self.log.get('1.0', tk.END).strip()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        messagebox.showinfo("Copy Log", "Log copied to clipboard!")
 
     def _toggle_process(self):
         if not self.process_running:

@@ -44,6 +44,7 @@ Changes:
 # Update on November 08, 2025: Increased CLASSIFICATION_TIMEOUT_S to 4.0s and sleep to 0.05s for better sync. Added 3x retry in send_cmd. Added MOISTURE_LOG_DELAY_MS constant. Removed extra text from moisture log. Lowered conf to 0.5 in perform_classification. Updated serial parsing for id= in ACK,MOTOR,START and ACK,SORT,L/R. Added handling for ERR,SYSTEM_PAUSED. Added no-candidates warning in perform_classification.
 # Update on November 08, 2025: Moved start detection log to ACK,ENQUEUE_PLACEHOLDER for correct idx/id parsing. Ignore ACK,MOTOR,START if id=-1 (ghost). Added warning if sent class not matched in ACK,CLASS_RECEIVED.
 # Update on November 08, 2025: Fixed class echo parsing in serial_reader_thread to correctly extract class and ID from "ACK,CLASS,...". Moved mismatch warning to this block for accurate checking. Cleaned class string for consistency.
+# Update on November 08, 2025: Fixed inconsistent logs: Relocated "moving to standard" to ACK,CLEAR_STANDARD. Removed moisture scheduling from ACK,CLASS_RECEIVED (keep on ACK,MOTOR,START). Use per-ID moisture dict to avoid stale values. Schedule on CLEAR_STANDARD for STANDARD sorts.
 """
 
 import tkinter as tk
@@ -156,6 +157,7 @@ class ACSSGui:
         self.frame_counter = 0
         self.last_results = None  # To persist bounding boxes for consistent display
         self.pending_moisture_log = None  # For delayed moisture logging
+        self.moistures = {}  # Per-ID moistures
         self.last_moisture = None
         self.last_sorted_id = "??"
         self.arduino_default = 'OVERCOOKED'  # Query on start
@@ -282,8 +284,14 @@ class ACSSGui:
         self.log.config(state='disabled')
 
     def _delayed_moisture_log(self):
-        if self.last_moisture is not None and self.last_sorted_id != "??":
-            self._log_message(f"Moisture: {self.last_moisture}%")
+        if self.last_sorted_id != "??":
+            try:
+                id_int = int(self.last_sorted_id)
+                if id_int in self.moistures:
+                    self._log_message(f"Moisture: {self.moistures[id_int]}%")
+                    del self.moistures[id_int]  # Clean up
+            except ValueError:
+                pass
         self.pending_moisture_log = None
 
     def _build_statistics_tab(self):
@@ -341,6 +349,7 @@ class ACSSGui:
         self.stats['start_time'] = None
         self.stats['end_time'] = None
         self.copra_counter = 0
+        self.moistures = {}
         self.update_stats()
         self._log_message("Statistics and Arduino state reset.")
 
@@ -547,7 +556,6 @@ class ACSSGui:
                         elif line.startswith("ACK,CLASS_RECEIVED,id="):
                             cid = line.split("=")[-1]
                             self._log_message(f"Classification received for Copra #{cid}")
-                            self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)  # Delay moisture after receipt
 
                         # === CONVEYOR STARTED → DELAY MOISTURE LOG ===
                         elif line.startswith("ACK,MOTOR,START"):
@@ -563,7 +571,13 @@ class ACSSGui:
                             if self.pending_moisture_log:
                                 self.root.after_cancel(self.pending_moisture_log)
                             self.pending_moisture_log = self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)
+
+                        # === STANDARD CLEAR ===
+                        elif line == "ACK,CLEAR_STANDARD":
                             self._log_message(f"Moving Copra #{self.last_sorted_id} → Standard (conveyor forward)")
+                            if self.pending_moisture_log:
+                                self.root.after_cancel(self.pending_moisture_log)
+                            self.pending_moisture_log = self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)
 
                         # === SORTING ACTIONS ===
                         elif line.startswith("ACK,SORT,L"):
@@ -709,7 +723,7 @@ class ACSSGui:
             category = self.category_map.get(cls, 'overcooked-copra')
             class_str = category.upper().replace('-COPRA', '')
 
-            self.last_moisture = moisture
+            self.moistures[id] = moisture
             self.last_sorted_id = f"{id:04d}"
             self.last_sent_class = class_str
             self.last_sent_id = str(id)

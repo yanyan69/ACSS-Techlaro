@@ -48,6 +48,7 @@ Changes:
 # Update on November 08, 2025: Added Copy Log button beside Clear Log button (copies log from console).
 # Update on November 08, 2025: Moved moisture logging to immediately after classification in perform_classification (no delay, prints right after "Class: ..."). Removed delayed logging and related vars/scheduling. Rounded moisture to 2 decimals based on research (raw: 7.1-60%, standard: 6-7%, overcooked: 4-5.9%).
 # Update on November 08, 2025: Adjusted copra # display to start from 1 (offset Arduino ID by +1 in logs). Added constant MOISTURE_PRINT_DELAY_MS = 2000 (2s delay after class log for moisture print). Scheduled moisture log with root.after for safe, non-disruptive delay.
+# Update on November 08, 2025: Added iou=0.45 to YOLO track calls in perform_classification and camera_loop to reduce overlapping bounding boxes via stricter NMS.
 """
 
 import tkinter as tk
@@ -671,6 +672,7 @@ class ACSSGui:
                     tracker=TRACKER_PATH,
                     conf=0.5,  # Lowered for fewer misses
                     max_det=1,
+                    iou=0.45,  # Added to reduce overlapping boxes
                     verbose=False
                 )
                 num_runs += 1
@@ -823,6 +825,7 @@ class ACSSGui:
                         tracker=TRACKER_PATH,
                         conf=0.3,
                         max_det=3,
+                        iou=0.45,  # Added to reduce overlapping boxes
                         verbose=False
                     )
                     self.last_results = results

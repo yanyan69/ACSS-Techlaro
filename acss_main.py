@@ -46,6 +46,7 @@ Changes:
 # Update on November 08, 2025: Fixed class echo parsing in serial_reader_thread to correctly extract class and ID from "ACK,CLASS,...". Moved mismatch warning to this block for accurate checking. Cleaned class string for consistency.
 # Update on November 08, 2025: Fixed inconsistent logs: Relocated "moving to standard" to ACK,CLEAR_STANDARD. Removed moisture scheduling from ACK,CLASS_RECEIVED (keep on ACK,MOTOR,START). Use per-ID moisture dict to avoid stale values. Schedule on CLEAR_STANDARD for STANDARD sorts.
 # Update on November 08, 2025: Added Copy Log button beside Clear Log button (copies log from console).
+# Update on November 08, 2025: Moved moisture logging to immediately after classification in perform_classification (no delay, prints right after "Class: ..."). Removed delayed logging and related vars/scheduling. Rounded moisture to 2 decimals based on research (raw: 7.1-60%, standard: 6-7%, overcooked: 4-5.9%).
 """
 
 import tkinter as tk
@@ -93,9 +94,8 @@ CLASSIFICATION_TIMEOUT_S = 4.0  # Increased for better sync
 MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
 PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 1  # Retry classification if frame is stale
-YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
+YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding boxes updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
-MOISTURE_LOG_DELAY_MS = 2000  # Adjustable constant for moisture log delay
 
 # ---------------------------------------------------
 
@@ -157,7 +157,6 @@ class ACSSGui:
         self.last_ping_time = 0
         self.frame_counter = 0
         self.last_results = None  # To persist bounding boxes for consistent display
-        self.pending_moisture_log = None  # For delayed moisture logging
         self.moistures = {}  # Per-ID moistures
         self.last_moisture = None
         self.last_sorted_id = "??"
@@ -295,18 +294,6 @@ class ACSSGui:
         self.log.insert("end", full_msg + "\n")
         self.log.see("end")
         self.log.config(state='disabled')
-
-    def _delayed_moisture_log(self):
-        if self.last_sorted_id != "??":
-            try:
-                id_int = int(self.last_sorted_id)
-                if id_int in self.moistures:
-                    moisture = self.moistures[id_int]
-                    self._log_message(f"Moisture: {moisture:.2f}%")
-                    del self.moistures[id_int]  # Clean up
-            except ValueError:
-                pass
-        self.pending_moisture_log = None
 
     def _build_statistics_tab(self):
         frm = tk.Frame(self.statistics_tab)
@@ -571,27 +558,9 @@ class ACSSGui:
                             cid = line.split("=")[-1]
                             self._log_message(f"Classification received for Copra #{cid}")
 
-                        # === CONVEYOR STARTED → DELAY MOISTURE LOG ===
-                        elif line.startswith("ACK,MOTOR,START"):
-                            parts = line.split(",")
-                            cid = "??"
-                            for p in parts:
-                                if "id=" in p:
-                                    cid = p.split("=")[1]
-                                    break
-                            if cid == "-1":
-                                continue  # Ignore ghost/test moves
-                            self.last_sorted_id = cid
-                            if self.pending_moisture_log:
-                                self.root.after_cancel(self.pending_moisture_log)
-                            self.pending_moisture_log = self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)
-
                         # === STANDARD CLEAR ===
                         elif line == "ACK,CLEAR_STANDARD":
                             self._log_message(f"Moving Copra #{self.last_sorted_id} → Standard (conveyor forward)")
-                            if self.pending_moisture_log:
-                                self.root.after_cancel(self.pending_moisture_log)
-                            self.pending_moisture_log = self.root.after(MOISTURE_LOG_DELAY_MS, self._delayed_moisture_log)
 
                         # === SORTING ACTIONS ===
                         elif line.startswith("ACK,SORT,L"):
@@ -737,8 +706,6 @@ class ACSSGui:
             category = self.category_map.get(cls, 'overcooked-copra')
             class_str = category.upper().replace('-COPRA', '')
 
-            self.moistures[id] = moisture
-            self.last_sorted_id = f"{id:04d}"
             self.last_sent_class = class_str
             self.last_sent_id = str(id)
 
@@ -747,6 +714,7 @@ class ACSSGui:
                 self.copra_counter += 1
                 cat_name = category.split('-')[0].capitalize()
                 self._log_message(f"Class: {cat_name.upper()}")
+                self._log_message(f"Moisture: {moisture:.2f}%")
                 self.stats[category] += 1
                 self.stats['total'] += 1
                 self.moisture_sums[category] += moisture

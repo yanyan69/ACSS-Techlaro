@@ -45,6 +45,7 @@ Changes:
 # Update on November 08, 2025: Moved start detection log to ACK,ENQUEUE_PLACEHOLDER for correct idx/id parsing. Ignore ACK,MOTOR,START if id=-1 (ghost). Added warning if sent class not matched in ACK,CLASS_RECEIVED.
 # Update on November 08, 2025: Fixed class echo parsing in serial_reader_thread to correctly extract class and ID from "ACK,CLASS,...". Moved mismatch warning to this block for accurate checking. Cleaned class string for consistency.
 # Update on November 08, 2025: Fixed inconsistent logs: Relocated "moving to standard" to ACK,CLEAR_STANDARD. Removed moisture scheduling from ACK,CLASS_RECEIVED (keep on ACK,MOTOR,START). Use per-ID moisture dict to avoid stale values. Schedule on CLEAR_STANDARD for STANDARD sorts.
+# Update on November 08, 2025: Added Copy Log button beside Clear Log button (copies log from console).
 """
 
 import tkinter as tk
@@ -94,7 +95,7 @@ PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 1  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
-MOISTURE_LOG_DELAY_MS = 5000  # Adjustable constant for moisture log delay
+MOISTURE_LOG_DELAY_MS = 2000  # Adjustable constant for moisture log delay
 
 # ---------------------------------------------------
 
@@ -300,7 +301,8 @@ class ACSSGui:
             try:
                 id_int = int(self.last_sorted_id)
                 if id_int in self.moistures:
-                    self._log_message(f"Moisture: {self.moistures[id_int]}%")
+                    moisture = self.moistures[id_int]
+                    self._log_message(f"Moisture: {moisture:.2f}%")
                     del self.moistures[id_int]  # Clean up
             except ValueError:
                 pass
@@ -330,7 +332,7 @@ class ACSSGui:
             tk.Label(stats_frame, text=cat).grid(row=i, column=0, padx=8, pady=4, sticky="w")
             self.stat_pieces[cat] = tk.Label(stats_frame, text="0")
             self.stat_pieces[cat].grid(row=i, column=1, padx=8, pady=4)
-            self.stat_moisture[cat] = tk.Label(stats_frame, text="0.0%")
+            self.stat_moisture[cat] = tk.Label(stats_frame, text="0.00%")
             self.stat_moisture[cat].grid(row=i, column=2, padx=8, pady=4)
 
         row_offset = len(categories) + 2
@@ -339,7 +341,7 @@ class ACSSGui:
         self.total_pieces_label.grid(row=row_offset, column=1, padx=8, pady=4)
 
         tk.Label(stats_frame, text="Total Avg Moisture:", font=("Arial", 10, "bold")).grid(row=row_offset+1, column=0, padx=8, pady=4, sticky="w")
-        self.total_moisture_label = tk.Label(stats_frame, text="0.0%")
+        self.total_moisture_label = tk.Label(stats_frame, text="0.00%")
         self.total_moisture_label.grid(row=row_offset+1, column=1, padx=8, pady=4)
 
         tk.Label(stats_frame, text="Processing Start Time:", font=("Arial", 10, "bold")).grid(row=row_offset+2, column=0, padx=8, pady=4, sticky="w")
@@ -710,7 +712,7 @@ class ACSSGui:
                                 moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
                             else:  # overcooked-copra
                                 moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
-                            moisture = round(moisture, 1)
+                            moisture = round(moisture, 2)
                             all_candidates.append((cls, conf, moisture))
 
                 if len(all_candidates) >= 2:
@@ -893,12 +895,12 @@ class ACSSGui:
                 pieces = self.stats[cat]
                 self.stat_pieces[cat].config(text=str(pieces))
                 moisture_avg = (self.moisture_sums[cat] / pieces) if pieces > 0 else 0.0
-                self.stat_moisture[cat].config(text=f"{moisture_avg:.1f}%")
+                self.stat_moisture[cat].config(text=f"{moisture_avg:.2f}%")
             self.total_pieces_label.config(text=str(self.stats['total']))
             total_pieces = self.stats['total']
             total_moisture = sum(self.moisture_sums.values())
             total_avg = (total_moisture / total_pieces) if total_pieces > 0 else 0.0
-            self.total_moisture_label.config(text=f"{total_avg:.1f}%")
+            self.total_moisture_label.config(text=f"{total_avg:.2f}%")
             start_str = time.strftime("%H:%M:%S", time.localtime(self.stats['start_time'])) if self.stats['start_time'] else "N/A"
             end_str = time.strftime("%H:%M:%S", time.localtime(self.stats['end_time'])) if self.stats['end_time'] else "N/A"
             self.start_time_label.config(text=start_str)

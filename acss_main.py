@@ -78,7 +78,11 @@ Changes:
 # Update on February 03, 2026: Muted "Process started" and "Process stopped" logs to prevent repetition.
 # Update on February 03, 2026: Adjusted moisture reading from 5s to 1s. Made buttons 3/4/1 run YOLO on press like arrows (same behavior, different zones). Removed stop/resume in manual/simulate since continuous motor (stopping won't do anything). Added debounce (1s) for arrow presses to avoid double reads. Added wait/retry in simulate_camera until object detected. Added total time (HH:MM:SS) in statistics, auto-calculated.
 # Update on February 03, 2026: Shifted manual control to flapper zone only (ignore cam/YOLO). Buttons/arrows now assign fixed class (left/L/3: RAW, right/R/1: OVERCOOKED, up/Y/4: STANDARD), generate random moisture in class range, log class then 1s-delayed moisture, update stats, send class to Arduino (no YOLO, no object wait).
-# Update on February 03, 2026: Simplified joystick mappings to avoid confusion: Button 6 (LS) for RAW, 7 (RS) for OVERCOOKED, 4 for STANDARD, 0 for start/stop. Removed other button and d-pad mappings. Removed keyboard classification bindings. Reverted simulate_flapper to simple send without extra triggers or default override to improve responsiveness and prevent double sends.
+# Update on February 03, 2026: Changed buttons to 6 (RAW), 7 (OVERCOOKED), 4 (STANDARD), 0 (start/stop). Updated d-pad: left=RAW, right=OVERCOOKED, up=STANDARD.
+# Update on February 03, 2026: Fixed servo response by sending TRIGGER_START, class, TRIGGER_FLAP sequence in simulate_flapper to simulate flow and trigger sorting.
+# Update on February 03, 2026: Updated button mappings: button 6 to OVERCOOKED, button 7 to RAW, button 4 to STANDARD, button 9 to toggle start/stop. Adjusted d-pad and keyboard bindings accordingly.
+# Update on February 03, 2026: Fixed double reading by increasing delay between sends to 0.2s and retries to 5. Removed default OVERCOOKED send on failure to avoid double class log; log error instead.
+# Update on February 04, 2026: Reverted to sequence for servo reaction, increased delays to 0.5s to prevent timeout/default. Removed moisture delay, print immediately. Kept simple logs and stats update only on success.
 """
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
@@ -190,6 +194,9 @@ class ACSSGui:
         self.last_sent_id = None
         # Manual control counter (for dummy IDs in manual sends)
         self.manual_id_counter = 0
+        # Cooldown for servo tests (2s to prevent spam)
+        self.last_servo_test_time = {6: 0, 7: 0}
+        self.servo_cooldown_ms = 2000
         # Debounce for button presses
         self.last_button_press_time = 0
         self.button_debounce_ms = 1000 # 1s interval to avoid double reads
@@ -218,7 +225,7 @@ class ACSSGui:
                                      font=("Arial", 10), bg="gray", fg="white")
         self.min_max_btn.place(relx=0.95, rely=0.95, anchor='se')
         self.min_max_btn.place_forget()
-        # Add keyboard bindings for system control (no classification bindings to avoid confusion)
+        # Add keyboard bindings for manual control
         self.root.bind('<a>', lambda e: self._toggle_process()) # Toggle start/stop
         self.root.bind('<p>', lambda e: self.send_cmd('PING')) # Ping Arduino
         self.root.bind('<e>', lambda e: self.send_cmd('EMERGENCY_STOP')) # Emergency stop
@@ -245,17 +252,21 @@ class ACSSGui:
                     if now - self.last_button_press_time < self.button_debounce_ms:
                         continue # Debounce
                     self.last_button_press_time = now
-                    if event.button == 6: # 6 (LS) for RAW
-                        self.simulate_flapper('RAW')
-                    elif event.button == 7: # 7 (RS) for OVERCOOKED
+                    if event.button == 6: # 6 for OVERCOOKED
                         self.simulate_flapper('OVERCOOKED')
+                    elif event.button == 7: # 7 for RAW
+                        self.simulate_flapper('RAW')
                     elif event.button == 4: # 4 for STANDARD
                         self.simulate_flapper('STANDARD')
                     elif event.button == 0: # 0 for toggle start/stop
                         self._toggle_process()
             time.sleep(0.05) # Poll rate
     def simulate_flapper(self, fixed_class):
-        """At flapper: Assign fixed class per button, random moisture in range, log class/delayed moisture, update stats, send class to Arduino."""
+        """At flapper: Assign fixed class per button, random moisture in range, log class/moisture, update stats, send class to Arduino."""
+        now = time.time() * 1000
+        if now - self.last_button_press_time < self.button_debounce_ms:
+            return # Debounce
+        self.last_button_press_time = now
         class_str = fixed_class.upper()
         category = f"{class_str.lower()}-copra"
         # Random moisture in class range
@@ -267,10 +278,19 @@ class ACSSGui:
             moisture = round(random.uniform(4.0, 5.9), 2)
         else:
             return # Invalid
-        self._log_message(f"Class: {class_str}")
-        self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
-        success = self.send_cmd(class_str)
-        if success:
+        self._log_message(f"Manual: Sending {class_str}")
+        # Pause auto process to avoid interference
+        self.send_cmd("AUTO_DISABLE")
+        time.sleep(0.5) # Increased delay
+        # Sequence to trigger servo: TRIGGER_START to start flow, set class, TRIGGER_FLAP to sort
+        success_start = self.send_cmd("TRIGGER_START")
+        time.sleep(0.5) # Increased delay
+        success_class = self.send_cmd(class_str)
+        time.sleep(0.5) # Increased delay
+        success_flap = self.send_cmd("TRIGGER_FLAP")
+        if success_start and success_class and success_flap:
+            self._log_message(f"Class: {class_str}")
+            self._log_message(f"Moisture: {moisture:.2f}%")
             self._log_message("Classification sorted")
             self.copra_counter += 1
             self.stats[category] += 1
@@ -278,7 +298,10 @@ class ACSSGui:
             self.moisture_sums[category] += moisture
             self.root.after(0, self.update_stats)
         else:
-            self._log_message("Send failed")
+            self._log_message(f"Manual send failed (start: {success_start}, class: {success_class}, flap: {success_flap})")
+        # Resume auto after short wait
+        time.sleep(2.0) # Allow time for manual action to complete
+        self.send_cmd("AUTO_ENABLE")
     def _on_tab_changed(self, event):
         notebook = event.widget
         selected_tab = notebook.select()
@@ -444,7 +467,7 @@ class ACSSGui:
         if self.serial and self.serial.is_open:
             self.serial.close()
             self._log_message("Serial port closed.")
-    def send_cmd(self, cmd, retries=3):
+    def send_cmd(self, cmd, retries=5):
         checksum = 0
         for c in cmd:
             checksum ^= ord(c)
@@ -554,7 +577,7 @@ class ACSSGui:
                 self.copra_counter += 1
                 cat_name = category.split('-')[0].capitalize()
                 self._log_message(f"Class: {cat_name.upper()}")
-                self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
+                self._log_message(f"Moisture: {moisture:.2f}%")
                 self.stats[category] += 1
                 self.stats['total'] += 1
                 self.moisture_sums[category] += moisture

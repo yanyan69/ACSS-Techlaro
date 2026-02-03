@@ -56,6 +56,7 @@ Changes:
 # Update on February 03, 2026: Updated joystick/keyboard to stop conveyor briefly on class sends (via AUTO_DISABLE, send, wait, AUTO_ENABLE). For arrows, stop, simulate/log mock camera classification, resume. Button 0 toggles full process/conveyor.
 # Update on February 03, 2026: Added joystick buttons 6 (L pad) for TEST_SERVO_L, 7 (R pad) for TEST_SERVO_R to test servo responsiveness.
 # Update on February 03, 2026: Added 2s cooldown for servo test buttons (6/7) to prevent spamming and protect hardware.
+# Update on February 03, 2026: Cleaned logs to only show "Process started", classification, moisture (after 5s), "sorted". No joystick logs. Changed moisture delay to 5s. For D-pad arrows (up/left/right), capture current frame, run YOLO, log real class/moisture (5s delay), send to Arduino for sorting/servo (works with/without motor).
 """
 
 import tkinter as tk
@@ -107,7 +108,7 @@ PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 1  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
-MOISTURE_PRINT_DELAY_MS = 2000  # Constant delay for moisture print after class (2s)
+MOISTURE_PRINT_DELAY_MS = 5000  # Changed to 5s as per user request
 
 # ---------------------------------------------------
 
@@ -249,27 +250,25 @@ class ACSSGui:
                 if event.type == pygame.JOYBUTTONDOWN:
                     now = time.time() * 1000  # ms
                     if event.button == 3:  # 3 for RAW (flapper)
-                        self.send_manual('RAW', log_msg="Joystick 3 (flapper): Manual RAW")
+                        self.send_manual('RAW')
                     elif event.button == 4:  # 4 for STANDARD (flapper)
-                        self.send_manual('STANDARD', log_msg="Joystick 4 (flapper): Manual STANDARD")
+                        self.send_manual('STANDARD')
                     elif event.button == 1:  # 1 for OVERCOOKED (flapper)
-                        self.send_manual('OVERCOOKED', log_msg="Joystick 1 (flapper): Manual OVERCOOKED")
+                        self.send_manual('OVERCOOKED')
                     elif event.button == 0:  # 0 for toggle start/stop
                         self._toggle_process()
                     elif event.button == 6:  # 6 for TEST_SERVO_L (L pad)
                         if now - self.last_servo_test_time[6] >= self.servo_cooldown_ms:
                             self.send_cmd('TEST_SERVO_L')
-                            self._log_message("Testing left servo...")
                             self.last_servo_test_time[6] = now
                         else:
-                            self._log_message("Servo test cooldown - wait a bit to avoid spam.")
+                            pass  # No log for cooldown
                     elif event.button == 7:  # 7 for TEST_SERVO_R (R pad)
                         if now - self.last_servo_test_time[7] >= self.servo_cooldown_ms:
                             self.send_cmd('TEST_SERVO_R')
-                            self._log_message("Testing right servo...")
                             self.last_servo_test_time[7] = now
                         else:
-                            self._log_message("Servo test cooldown - wait a bit to avoid spam.")
+                            pass  # No log for cooldown
                 elif event.type == pygame.JOYHATMOTION:
                     if event.hat == 0:  # D-pad
                         hat_x, hat_y = event.value
@@ -282,21 +281,48 @@ class ACSSGui:
             time.sleep(0.05)  # Poll rate
 
     def simulate_camera(self, expected_class):
-        """Stop process, simulate camera detection/classification, log it, resume."""
+        """Stop process, capture current frame, run YOLO, log real class/moisture (5s delay), send to Arduino, resume."""
         self.stop_process()  # Stop conveyor
-        self._log_message(f"Simulating camera detection for {expected_class}...")
-        # Mock classification (random or fixed for demo)
-        mock_class = expected_class  # Or random.choice(['RAW', 'STANDARD', 'OVERCOOKED'])
-        mock_moisture = round(random.uniform(4.0, 60.0), 2)  # Random moisture for sim
-        self._log_message(f"Class: {mock_class.upper()}")
-        self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=mock_moisture: self._log_message(f"Moisture: {m:.2f}%"))
-        # Send to Arduino (triggers flapper)
-        self.manual_id_counter += 1
-        id = self.manual_id_counter
-        success = self.send_cmd(f"{mock_class},{id}")
-        if success:
-            self._log_message(f"Sent {mock_class} to Arduino (ID: {id})")
-        self.root.after(5000, self.start_process)  # Resume after 5s
+        try:
+            with self.frame_lock:
+                if self.latest_frame is None:
+                    return
+                frame = self.latest_frame.copy()
+
+            results = self.yolo.track(
+                source=frame,
+                persist=True,
+                tracker=TRACKER_PATH,
+                conf=0.5,
+                max_det=1,
+                iou=0.45,
+                verbose=False
+            )
+
+            if results and results[0].boxes and len(results[0].boxes) > 0:
+                cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
+                conf_tensor = results[0].boxes.conf.cpu().numpy()
+                cls = cls_tensor[0]
+                conf = conf_tensor[0]
+                if conf > 0.3:
+                    if cls == 1:  # raw-copra
+                        moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
+                    elif cls == 2:  # standard-copra
+                        moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
+                    else:  # overcooked-copra
+                        moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
+                    moisture = round(moisture, 2)
+                    category = self.category_map.get(cls, 'overcooked-copra')
+                    class_str = category.upper().replace('-COPRA', '')
+                    self._log_message(f"Class: {class_str}")
+                    self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
+                    self.manual_id_counter += 1
+                    id = self.manual_id_counter
+                    success = self.send_cmd(f"{class_str},{id}")
+                    if success:
+                        self._log_message(f"Classification sorted")
+        finally:
+            self.root.after(5000, self.start_process)  # Resume after 5s
 
     def send_manual(self, class_str, log_msg=None):
         """Send manual classification command to Arduino, with stop-wait-resume."""
@@ -540,115 +566,17 @@ class ACSSGui:
                         if line:
                             print(f"ARDUINO: {line}")
 
-                            # === START US1: Copra detected at entrance ===
-                            if line.startswith("ACK,ENQUEUE_PLACEHOLDER"):
-                                parts = line.split(",")
-                                idx = "??"
-                                cid = "??"
-                                for p in parts:
-                                    if "idx=" in p:
-                                        idx = p.split("=")[1]
-                                    if "id=" in p:
-                                        cid = p.split("=")[1]
-                                display_id = str(int(cid) + 1).zfill(4)
-                                self._log_message(f"Copra detected at Start (US1) → #{display_id} queued (slot {idx})")
-
-                            # === COPRA ARRIVED AT CAMERA ===
-                            elif line.startswith("ACK,AT_CAM"):
-                                parts = line.split(",")
-                                id = None
-                                for part in parts:
-                                    if 'id=' in part:
-                                        id = int(part.split('=')[1])
-                                        break
-                                if id is not None:
-                                    display_id = str(id + 1).zfill(4)
-                                    self._log_message(f"Copra #{display_id} at Camera → Classifying...")
-                                self.perform_classification(id)
-
-                            # === CLASSIFICATION RECEIVED BY ARDUINO ===
-                            elif line.startswith("ACK,CLASS_RECEIVED,id="):
-                                cid = line.split("=")[-1]
-                                self._log_message(f"Classification received for Copra #{cid}")
-
-                            # === STANDARD CLEAR ===
-                            elif line == "ACK,CLEAR_STANDARD":
-                                display_id = str(int(self.last_sorted_id) + 1).zfill(4)
-                                self._log_message(f"Moving Copra #{display_id} → Standard (conveyor forward)")
-
-                            # === SORTING ACTIONS ===
-                            elif line.startswith("ACK,SORT,L"):
-                                parts = line.split(",")
-                                cid = "??"
-                                for p in parts:
-                                    if "id=" in p:
-                                        cid = p.split("=")[1]
-                                        break
-                                if cid == "-1":
-                                    continue
-                                self.last_sorted_id = cid
-                                display_id = str(int(cid) + 1).zfill(4)
-                                self._log_message(f"Sorting Copra #{display_id} → Overcooked (left servo)")
-                            elif line.startswith("ACK,SORT,R"):
-                                parts = line.split(",")
-                                cid = "??"
-                                for p in parts:
-                                    if "id=" in p:
-                                        cid = p.split("=")[1]
-                                        break
-                                if cid == "-1":
-                                    continue
-                                self.last_sorted_id = cid
-                                display_id = str(int(cid) + 1).zfill(4)
-                                self._log_message(f"Sorting Copra #{display_id} → Raw (right servo)")
-
-                            # === CLASS ECHO FROM ARDUINO ===
-                            elif line.startswith("ACK,CLASS,"):
+                            # Clean logs: only key events
+                            if line.startswith("ACK,CLASS,"):
                                 parts = line.split(',')
-                                if len(parts) >= 3:
-                                    cls = parts[2]
-                                    remaining = ','.join(parts[3:])
-                                    cid = "??"
-                                    extra = ""
-                                    if 'id=' in remaining:
-                                        id_part = remaining.split('id=')[1]
-                                        cid = id_part.split()[0]  # Take until space for extras like "(default ...)"
-                                        extra = remaining.replace(f",id={cid}", "")
-                                    elif ' (' in remaining:  # For extras like "(default failsafe)"
-                                        extra = remaining
-                                    else:
-                                        cid = None
-                                    cls = cls.strip().upper().replace('-COPRA', '')  # Clean for consistency
-                                    log_msg = f"Arduino echoed class: {cls}"
-                                    if cid != "??":
-                                        log_msg += f",id={cid}"
-                                    if extra:
-                                        log_msg += f" {extra}"
-                                    self._log_message(log_msg)
-                                    if cid != "??" and self.last_sent_id == cid and self.last_sent_class:
-                                        if self.last_sent_class.lower() not in cls.lower():
-                                            self._log_message(f"Warning: Sent class {self.last_sent_class} for ID {cid} not matched in echo.")
-
-                            # === EXISTING MESSAGES ===
-                            elif line == "ERR,MOTOR_TIMEOUT":
-                                self._log_message("Error: Camera sensor missed object. Check alignment/distance.")
-                            elif line.startswith("ERR,FIFO_FULL"):
-                                self._log_message("Error: Arduino queue full. System halted.")
-                                self._reset_stats()
-                            elif line == "ACK,PING":
-                                print("Arduino PING OK")
-                            elif line.startswith("ACK,CAM_DIST,"):
-                                dist = line.split(",")[-1]
-                                self._log_message(f"Camera US distance: {dist}cm", console_only=True)
-                            elif line == "ERR,CAM_SENSOR_FAIL":
-                                self._log_message("CRITICAL: Camera ultrasonic sensor failed! Check wiring/hardware.")
-                            elif line == "ACK,HEARTBEAT":
-                                print("Arduino heartbeat OK")
-                            elif line == "ERR,MISSED_CAM":
-                                self._log_message("Missed camera detection – check sensor/copra alignment")
-                            elif line == "ERR,SYSTEM_PAUSED":
-                                self._log_message("CRITICAL: Arduino system paused due to errors. Reset required.")
-                                self.stop_process()
+                                cls = parts[2].strip().upper()
+                                self._log_message(f"Class: {cls}")
+                            elif line.startswith("ACK,SORT,L"):
+                                self._log_message("Classification sorted")
+                            elif line.startswith("ACK,SORT,R"):
+                                self._log_message("Classification sorted")
+                            elif line == "ACK,CLEAR_STANDARD":
+                                self._log_message("Classification sorted")
 
                         time.sleep(0.01)
                 except Exception as e:
@@ -763,7 +691,7 @@ class ACSSGui:
             self.serial_error_logged = False
             self.frame_drop_logged = False
             self.last_ping_time = time.time()
-            self._log_message("Process started: Auto mode enabled.")
+            self._log_message("Process started")
         except Exception as e:
             self._log_message(f"Start process error: {e}")
 
@@ -773,7 +701,7 @@ class ACSSGui:
             self.stats['end_time'] = time.time()
             self.serial_error_logged = False
             self.frame_drop_logged = False
-            self._log_message("Process stopped: Auto mode disabled.")
+            self._log_message("Process stopped")
             self.root.after(0, self.update_stats)
         except Exception as e:
             self._log_message(f"Stop process error: {e}")

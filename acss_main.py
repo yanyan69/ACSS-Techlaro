@@ -61,6 +61,7 @@ Changes:
 # Update on February 03, 2026: Adjusted moisture reading from 5s to 1s. Made buttons 3/4/1 run YOLO on press like arrows (same behavior, different zones). Removed stop/resume in manual/simulate since continuous motor (stopping won't do anything). Added debounce (1s) for arrow presses to avoid double reads. Added wait/retry in simulate_camera until object detected. Added total time (HH:MM:SS) in statistics, auto-calculated.
 # Update on February 03, 2026: Shifted manual control to flapper zone only (ignore cam/YOLO). Buttons/arrows now assign fixed class (left/L/3: RAW, right/R/1: OVERCOOKED, up/Y/4: STANDARD), generate random moisture in class range, log class then 1s-delayed moisture, update stats, send class to Arduino (no YOLO, no object wait).
 # Update on February 03, 2026: Changed buttons to 6 (RAW), 7 (OVERCOOKED), 4 (STANDARD), 0 (start/stop). Updated d-pad: left=RAW, right=OVERCOOKED, up=STANDARD.
+# Update on February 03, 2026: Fixed servo response by sending TRIGGER_START, class, TRIGGER_FLAP sequence in simulate_flapper to simulate flow and trigger sorting.
 """
 
 import tkinter as tk
@@ -303,7 +304,13 @@ class ACSSGui:
         self._log_message(f"Class: {class_str}")
         self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
 
-        success = self.send_cmd(class_str)
+        # Sequence to trigger servo: TRIGGER_START to start flow, set class, TRIGGER_FLAP to sort
+        self.send_cmd("TRIGGER_START")
+        time.sleep(0.05)
+        self.send_cmd(class_str)
+        time.sleep(0.05)
+        success = self.send_cmd("TRIGGER_FLAP")
+
         if success:
             self._log_message("Classification sorted")
             self.copra_counter += 1

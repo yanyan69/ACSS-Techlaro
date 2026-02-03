@@ -59,6 +59,8 @@ Changes:
 # Update on February 03, 2026: Cleaned logs to only show "Process started", classification, moisture (after 5s), "sorted". No joystick logs. Changed moisture delay to 5s. For D-pad arrows (up/left/right), capture current frame, run YOLO, log real class/moisture (5s delay), send to Arduino for sorting/servo (works with/without motor).
 # Update on February 03, 2026: Muted "Process started" and "Process stopped" logs to prevent repetition.
 # Update on February 03, 2026: Adjusted moisture reading from 5s to 1s. Made buttons 3/4/1 run YOLO on press like arrows (same behavior, different zones). Removed stop/resume in manual/simulate since continuous motor (stopping won't do anything). Added debounce (1s) for arrow presses to avoid double reads. Added wait/retry in simulate_camera until object detected. Added total time (HH:MM:SS) in statistics, auto-calculated.
+# Update on February 03, 2026: Shifted manual control to flapper zone only (ignore cam/YOLO). Buttons/arrows now assign fixed class (left/L/3: RAW, right/R/1: OVERCOOKED, up/Y/4: STANDARD), generate random moisture in class range, log class then 1s-delayed moisture, update stats, send class to Arduino (no YOLO, no object wait).
+# Update on February 03, 2026: Changed buttons to 6 (RAW), 7 (OVERCOOKED), 4 (STANDARD), 0 (start/stop). Updated d-pad: left=RAW, right=OVERCOOKED, up=STANDARD.
 """
 
 import tkinter as tk
@@ -232,12 +234,12 @@ class ACSSGui:
         self.root.bind('<h>', lambda e: self.send_cmd('GET_DEFAULT'))    # Get default class
 
         # Joystick-style keys for manual classifications
-        self.root.bind('<Left>', lambda e: self.simulate_camera())    # Left for simulation in zone
-        self.root.bind('<x>', lambda e: self.simulate_camera())       # X similar
-        self.root.bind('<Up>', lambda e: self.simulate_camera())      # Up for simulation in zone
-        self.root.bind('<y>', lambda e: self.simulate_camera())       # Y similar
-        self.root.bind('<Right>', lambda e: self.simulate_camera())   # Right for simulation in zone
-        self.root.bind('<b>', lambda e: self.simulate_camera())       # B similar
+        self.root.bind('<Left>', lambda e: self.simulate_flapper('RAW'))      # Left for RAW
+        self.root.bind('<x>', lambda e: self.simulate_flapper('RAW'))         # X similar to left
+        self.root.bind('<Up>', lambda e: self.simulate_flapper('STANDARD'))   # Up for STANDARD
+        self.root.bind('<y>', lambda e: self.simulate_flapper('STANDARD'))    # Y similar to up
+        self.root.bind('<Right>', lambda e: self.simulate_flapper('OVERCOOKED')) # Right for OVERCOOKED
+        self.root.bind('<b>', lambda e: self.simulate_flapper('OVERCOOKED'))  # B similar to right
 
         # Initialize pygame for joystick
         pygame.init()
@@ -255,81 +257,63 @@ class ACSSGui:
             for event in pygame.event.get():
                 if event.type == pygame.JOYBUTTONDOWN:
                     now = time.time() * 1000  # ms
-                    if event.button in [1, 3, 4]:  # 1,3,4 now run simulate_camera for YOLO-based servo move
-                        self.simulate_camera()
+                    if event.button == 6:  # 6 for RAW
+                        self.simulate_flapper('RAW')
+                    elif event.button == 4:  # 4 for STANDARD
+                        self.simulate_flapper('STANDARD')
+                    elif event.button == 7:  # 7 for OVERCOOKED
+                        self.simulate_flapper('OVERCOOKED')
                     elif event.button == 0:  # 0 for toggle start/stop
                         self._toggle_process()
-                    elif event.button == 6:  # 6 for TEST_SERVO_L (L pad)
-                        if now - self.last_servo_test_time[6] >= self.servo_cooldown_ms:
-                            self.send_cmd('TEST_SERVO_L')
-                            self.last_servo_test_time[6] = now
-                    elif event.button == 7:  # 7 for TEST_SERVO_R (R pad)
-                        if now - self.last_servo_test_time[7] >= self.servo_cooldown_ms:
-                            self.send_cmd('TEST_SERVO_R')
-                            self.last_servo_test_time[7] = now
+                    elif event.button == 3:  # Optional: Keep or remap if needed
+                        pass
+                    elif event.button == 1:  # Optional: Keep or remap if needed
+                        pass
                 elif event.type == pygame.JOYHATMOTION:
                     if event.hat == 0:  # D-pad
                         hat_x, hat_y = event.value
-                        if hat_x != 0 or hat_y != 0:
-                            self.simulate_camera()
+                        if hat_x == -1:  # Left (RAW)
+                            self.simulate_flapper('RAW')
+                        elif hat_x == 1:  # Right (OVERCOOKED)
+                            self.simulate_flapper('OVERCOOKED')
+                        elif hat_y == 1:  # Up (STANDARD)
+                            self.simulate_flapper('STANDARD')
             time.sleep(0.05)  # Poll rate
 
-    def simulate_camera(self):
-        """Capture current frame, run YOLO until object seen (with retries), log class/moisture (1s delay), send to Arduino for servo move."""
+    def simulate_flapper(self, fixed_class):
+        """At flapper: Assign fixed class per button, random moisture in range, log class/delayed moisture, update stats, send class to Arduino."""
         now = time.time() * 1000
         if now - self.last_button_press_time < self.button_debounce_ms:
             return  # Debounce
         self.last_button_press_time = now
 
-        detected = False
-        for attempt in range(5):  # Retry up to 5 times to wait for object
-            try:
-                with self.frame_lock:
-                    if self.latest_frame is None:
-                        time.sleep(0.1)
-                        continue
-                    frame = self.latest_frame.copy()
+        class_str = fixed_class.upper()
+        category = f"{class_str.lower()}-copra"
 
-                results = self.yolo.track(
-                    source=frame,
-                    persist=True,
-                    tracker=TRACKER_PATH,
-                    conf=0.5,
-                    max_det=1,
-                    iou=0.45,
-                    verbose=False
-                )
+        # Random moisture in class range
+        if class_str == 'RAW':
+            moisture = round(random.uniform(7.1, 60.0), 2)
+        elif class_str == 'STANDARD':
+            moisture = round(random.uniform(6.0, 7.0), 2)
+        elif class_str == 'OVERCOOKED':
+            moisture = round(random.uniform(4.0, 5.9), 2)
+        else:
+            return  # Invalid
 
-                if results and results[0].boxes and len(results[0].boxes) > 0:
-                    cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
-                    conf_tensor = results[0].boxes.conf.cpu().numpy()
-                    cls = cls_tensor[0]
-                    conf = conf_tensor[0]
-                    if conf > 0.3:
-                        if cls == 1:  # raw-copra
-                            moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
-                        elif cls == 2:  # standard-copra
-                            moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
-                        else:  # overcooked-copra
-                            moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
-                        moisture = round(moisture, 2)
-                        category = self.category_map.get(cls, 'overcooked-copra')
-                        class_str = category.upper().replace('-COPRA', '')
-                        self._log_message(f"Class: {class_str}")
-                        self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
-                        self.manual_id_counter += 1
-                        id = self.manual_id_counter
-                        success = self.send_cmd(f"{class_str}")
-                        if success:
-                            self._log_message("Classification sorted")
-                        detected = True
-                        break
-            except Exception as e:
-                print(f"YOLO error: {e}")
-            time.sleep(0.2)  # Wait before retry
+        self._log_message(f"Class: {class_str}")
+        self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
 
-        if not detected:
-            self._log_message("No object detected after retries → Skipping")
+        success = self.send_cmd(class_str)
+        if success:
+            self._log_message("Classification sorted")
+            self.copra_counter += 1
+            self.stats[category] += 1
+            self.stats['total'] += 1
+            self.moisture_sums[category] += moisture
+            self.root.after(0, self.update_stats)
+        else:
+            self._log_message("Send failed → Defaulting to OVERCOOKED")
+            self.send_cmd("OVERCOOKED")
 
     def _on_tab_changed(self, event):
         notebook = event.widget

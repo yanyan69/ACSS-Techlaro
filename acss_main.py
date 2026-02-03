@@ -64,6 +64,7 @@ Changes:
 # Update on February 03, 2026: Fixed servo response by sending TRIGGER_START, class, TRIGGER_FLAP sequence in simulate_flapper to simulate flow and trigger sorting.
 # Update on February 03, 2026: Updated button mappings: button 6 to OVERCOOKED, button 7 to RAW, button 4 to STANDARD, button 9 to toggle start/stop. Adjusted d-pad and keyboard bindings accordingly.
 # Update on February 03, 2026: Fixed double reading by increasing delay between sends to 0.2s and retries to 5. Removed default OVERCOOKED send on failure to avoid double class log; log error instead.
+# Update on February 03, 2026: Updated joystick mappings for buttons 6, 7, and 4 to send OVERCOOKED, RAW, and STANDARD respectively, ensuring automatic updates to logs and statistics on press.
 """
 
 import tkinter as tk
@@ -271,14 +272,12 @@ class ACSSGui:
                         self.simulate_flapper('OVERCOOKED')
                     elif event.button == 0:  # 0 for toggle start/stop
                         self._toggle_process()
-                    elif event.button == 6:  # 6 for TEST_SERVO_L (L pad)
-                        if now - self.last_servo_test_time[6] >= self.servo_cooldown_ms:
-                            self.send_cmd('TEST_SERVO_L')
-                            self.last_servo_test_time[6] = now
-                    elif event.button == 7:  # 7 for TEST_SERVO_R (R pad)
-                        if now - self.last_servo_test_time[7] >= self.servo_cooldown_ms:
-                            self.send_cmd('TEST_SERVO_R')
-                            self.last_servo_test_time[7] = now
+                    elif event.button == 6:  # 6 for OVERCOOKED
+                        self.simulate_flapper('OVERCOOKED')
+                    elif event.button == 7:  # 7 for RAW
+                        self.simulate_flapper('RAW')
+                    elif event.button == 9:  # 9 for toggle start/stop
+                        self._toggle_process()
                 elif event.type == pygame.JOYHATMOTION:
                     now = time.time() * 1000
                     if now - self.last_button_press_time < self.button_debounce_ms:

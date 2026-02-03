@@ -53,6 +53,7 @@ Changes:
 # Update on February 03, 2026: Added keyboard bindings for manual control: 'a' for OVERCOOKED (left servo), 's' for STANDARD (conveyor clear), 'd' for RAW (right servo). Added more keys for full manual prototype control.
 # Update on February 03, 2026: Added joystick support with polling thread. Mapped d-pad left/X button to RAW, up/Y to STANDARD, right/B to OVERCOOKED. On manual key/joystick press, stop process, send class, wait 5s, resume process. Reassigned 'a' to toggle start/stop.
 # Update on February 03, 2026: Reassigned joystick buttons: 3 for RAW, 4 for STANDARD, 1 for OVERCOOKED, 0 for toggle start/stop. D-pad arrows unchanged. Removed joystick detection log.
+# Update on February 03, 2026: Updated joystick/keyboard to stop conveyor briefly on class sends (via AUTO_DISABLE, send, wait, AUTO_ENABLE). For arrows, stop, simulate/log mock camera classification, resume. Button 0 toggles full process/conveyor.
 """
 
 import tkinter as tk
@@ -60,6 +61,7 @@ from tkinter import ttk, scrolledtext, messagebox
 import sys, threading, time
 from collections import Counter
 import pygame  # Added for joystick support
+import random  # For mock classification
 
 # Optional imports (graceful degradation)
 try:
@@ -217,12 +219,12 @@ class ACSSGui:
         self.root.bind('<h>', lambda e: self.send_cmd('GET_DEFAULT'))    # Get default class
 
         # Joystick-style keys for manual classifications
-        self.root.bind('<Left>', lambda e: self.send_manual('RAW', log_msg="Camera zone: Manual RAW"))  # Left for RAW (camera/log)
+        self.root.bind('<Left>', lambda e: self.simulate_camera('RAW'))    # Left for RAW (simulate cam/log)
         self.root.bind('<x>', lambda e: self.send_manual('RAW', log_msg="Flapper zone: Manual RAW"))    # X for RAW (flapper)
-        self.root.bind('<Up>', lambda e: self.send_manual('STANDARD'))                                  # Up for STANDARD
-        self.root.bind('<y>', lambda e: self.send_manual('STANDARD'))                                   # Y for STANDARD
-        self.root.bind('<Right>', lambda e: self.send_manual('OVERCOOKED'))                             # Right for OVERCOOKED
-        self.root.bind('<b>', lambda e: self.send_manual('OVERCOOKED'))                                 # B for OVERCOOKED
+        self.root.bind('<Up>', lambda e: self.simulate_camera('STANDARD')) # Up for STANDARD (simulate cam)
+        self.root.bind('<4>', lambda e: self.send_manual('STANDARD', log_msg="Flapper zone: Manual STANDARD")) # 4 for STANDARD (flapper)
+        self.root.bind('<Right>', lambda e: self.simulate_camera('OVERCOOKED')) # Right for OVERCOOKED (simulate cam)
+        self.root.bind('<b>', lambda e: self.send_manual('OVERCOOKED', log_msg="Flapper zone: Manual OVERCOOKED")) # B for OVERCOOKED (flapper)
 
         # Initialize pygame for joystick
         pygame.init()
@@ -239,24 +241,41 @@ class ACSSGui:
         while self.running:
             for event in pygame.event.get():
                 if event.type == pygame.JOYBUTTONDOWN:
-                    if event.button == 3:  # 3 for RAW
-                        self.send_manual('RAW')
-                    elif event.button == 4:  # 4 for STANDARD
-                        self.send_manual('STANDARD')
-                    elif event.button == 1:  # 1 for OVERCOOKED
-                        self.send_manual('OVERCOOKED')
+                    if event.button == 3:  # 3 for RAW (flapper)
+                        self.send_manual('RAW', log_msg="Joystick 3 (flapper): Manual RAW")
+                    elif event.button == 4:  # 4 for STANDARD (flapper)
+                        self.send_manual('STANDARD', log_msg="Joystick 4 (flapper): Manual STANDARD")
+                    elif event.button == 1:  # 1 for OVERCOOKED (flapper)
+                        self.send_manual('OVERCOOKED', log_msg="Joystick 1 (flapper): Manual OVERCOOKED")
                     elif event.button == 0:  # 0 for toggle start/stop
                         self._toggle_process()
                 elif event.type == pygame.JOYHATMOTION:
                     if event.hat == 0:  # D-pad
                         hat_x, hat_y = event.value
                         if hat_x == -1:  # Left (RAW, camera/log)
-                            self.send_manual('RAW', log_msg="Joystick Left (camera): Manual RAW")
-                        elif hat_x == 1:  # Right (OVERCOOKED)
-                            self.send_manual('OVERCOOKED')
-                        elif hat_y == 1:  # Up (STANDARD)
-                            self.send_manual('STANDARD')
+                            self.simulate_camera('RAW')
+                        elif hat_x == 1:  # Right (OVERCOOKED, camera/log)
+                            self.simulate_camera('OVERCOOKED')
+                        elif hat_y == 1:  # Up (STANDARD, camera/log)
+                            self.simulate_camera('STANDARD')
             time.sleep(0.05)  # Poll rate
+
+    def simulate_camera(self, expected_class):
+        """Stop process, simulate camera detection/classification, log it, resume."""
+        self.stop_process()  # Stop conveyor
+        self._log_message(f"Simulating camera detection for {expected_class}...")
+        # Mock classification (random or fixed for demo)
+        mock_class = expected_class  # Or random.choice(['RAW', 'STANDARD', 'OVERCOOKED'])
+        mock_moisture = round(random.uniform(4.0, 60.0), 2)  # Random moisture for sim
+        self._log_message(f"Class: {mock_class.upper()}")
+        self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=mock_moisture: self._log_message(f"Moisture: {m:.2f}%"))
+        # Send to Arduino (triggers flapper)
+        self.manual_id_counter += 1
+        id = self.manual_id_counter
+        success = self.send_cmd(f"{mock_class},{id}")
+        if success:
+            self._log_message(f"Sent {mock_class} to Arduino (ID: {id})")
+        self.root.after(5000, self.start_process)  # Resume after 5s
 
     def send_manual(self, class_str, log_msg=None):
         """Send manual classification command to Arduino, with stop-wait-resume."""

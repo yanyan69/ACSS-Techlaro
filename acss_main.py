@@ -60,10 +60,6 @@ Changes:
 # Update on February 03, 2026: Muted "Process started" and "Process stopped" logs to prevent repetition.
 # Update on February 03, 2026: Adjusted moisture reading from 5s to 1s. Made buttons 3/4/1 run YOLO on press like arrows (same behavior, different zones). Removed stop/resume in manual/simulate since continuous motor (stopping won't do anything). Added debounce (1s) for arrow presses to avoid double reads. Added wait/retry in simulate_camera until object detected. Added total time (HH:MM:SS) in statistics, auto-calculated.
 # Update on February 03, 2026: Shifted manual control to flapper zone only (ignore cam/YOLO). Buttons/arrows now assign fixed class (left/L/3: RAW, right/R/1: OVERCOOKED, up/Y/4: STANDARD), generate random moisture in class range, log class then 1s-delayed moisture, update stats, send class to Arduino (no YOLO, no object wait).
-# Update on February 03, 2026: Changed buttons to 6 (RAW), 7 (OVERCOOKED), 4 (STANDARD), 0 (start/stop). Updated d-pad: left=RAW, right=OVERCOOKED, up=STANDARD.
-# Update on February 03, 2026: Fixed servo response by sending TRIGGER_START, class, TRIGGER_FLAP sequence in simulate_flapper to simulate flow and trigger sorting.
-# Update on February 03, 2026: Updated button mappings: button 6 to OVERCOOKED, button 7 to RAW, button 4 to STANDARD, button 9 to toggle start/stop. Adjusted d-pad and keyboard bindings accordingly.
-# Update on February 03, 2026: Fixed double reading by increasing delay between sends to 0.2s and retries to 5. Removed default OVERCOOKED send on failure to avoid double class log; log error instead.
 """
 
 import tkinter as tk
@@ -260,28 +256,23 @@ class ACSSGui:
             for event in pygame.event.get():
                 if event.type == pygame.JOYBUTTONDOWN:
                     now = time.time() * 1000  # ms
-                    if now - self.last_button_press_time < self.button_debounce_ms:
-                        continue  # Debounce
-                    self.last_button_press_time = now
-                    if event.button == 6:  # 6 for OVERCOOKED
-                        self.simulate_flapper('OVERCOOKED')
+                    if event.button == 3:  # 3 for RAW
+                        self.simulate_flapper('RAW')
                     elif event.button == 4:  # 4 for STANDARD
                         self.simulate_flapper('STANDARD')
-                    elif event.button == 7:  # 7 for RAW
-                        self.simulate_flapper('RAW')
-                    elif event.button == 9:  # 9 for toggle start/stop
+                    elif event.button == 1:  # 1 for OVERCOOKED
+                        self.simulate_flapper('OVERCOOKED')
+                    elif event.button == 0:  # 0 for toggle start/stop
                         self._toggle_process()
-                    elif event.button == 0:  # Optional: Remove or keep if needed
-                        pass
-                    elif event.button == 3:  # Optional: Keep or remap if needed
-                        pass
-                    elif event.button == 1:  # Optional: Keep or remap if needed
-                        pass
+                    elif event.button == 6:  # 6 for TEST_SERVO_L (L pad)
+                        if now - self.last_servo_test_time[6] >= self.servo_cooldown_ms:
+                            self.send_cmd('TEST_SERVO_L')
+                            self.last_servo_test_time[6] = now
+                    elif event.button == 7:  # 7 for TEST_SERVO_R (R pad)
+                        if now - self.last_servo_test_time[7] >= self.servo_cooldown_ms:
+                            self.send_cmd('TEST_SERVO_R')
+                            self.last_servo_test_time[7] = now
                 elif event.type == pygame.JOYHATMOTION:
-                    now = time.time() * 1000
-                    if now - self.last_button_press_time < self.button_debounce_ms:
-                        continue  # Debounce
-                    self.last_button_press_time = now
                     if event.hat == 0:  # D-pad
                         hat_x, hat_y = event.value
                         if hat_x == -1:  # Left (RAW)
@@ -312,22 +303,11 @@ class ACSSGui:
         else:
             return  # Invalid
 
-        self._log_message(f"Manual: Sending {class_str}")
+        self._log_message(f"Class: {class_str}")
+        self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
 
-        # Pause auto process to avoid interference
-        self.send_cmd("AUTO_DISABLE")
-        time.sleep(0.2)  # Wait for disable
-
-        # Sequence to trigger servo: TRIGGER_START to start flow, set class, TRIGGER_FLAP to sort
-        success_start = self.send_cmd("TRIGGER_START")
-        time.sleep(0.2)  # Increased delay
-        success_class = self.send_cmd(class_str)
-        time.sleep(0.2)  # Increased delay
-        success_flap = self.send_cmd("TRIGGER_FLAP")
-
-        if success_start and success_class and success_flap:
-            self._log_message(f"Class: {class_str}")
-            self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
+        success = self.send_cmd(class_str)
+        if success:
             self._log_message("Classification sorted")
             self.copra_counter += 1
             self.stats[category] += 1
@@ -335,11 +315,8 @@ class ACSSGui:
             self.moisture_sums[category] += moisture
             self.root.after(0, self.update_stats)
         else:
-            self._log_message(f"Manual send failed (start: {success_start}, class: {success_class}, flap: {success_flap}) - No override sent")
-
-        # Resume auto after short wait
-        time.sleep(2.0)  # Allow time for manual action to complete
-        self.send_cmd("AUTO_ENABLE")
+            self._log_message("Send failed → Defaulting to OVERCOOKED")
+            self.send_cmd("OVERCOOKED")
 
     def _on_tab_changed(self, event):
         notebook = event.widget
@@ -521,6 +498,7 @@ class ACSSGui:
         exit_btn = tk.Button(frm, text="Exit", font=("Arial", 12), bg="red", fg="white", command=self.root.quit)
         exit_btn.pack(pady=10)
         cancel_btn = tk.Button(frm, text="Cancel", font=("Arial", 12), command=lambda: self.root.quit())  # Placeholder
+        cancel_btn.pack(pady=10)
 
     def open_serial(self):
         if SERIAL_AVAILABLE:
@@ -539,7 +517,7 @@ class ACSSGui:
             self.serial.close()
             self._log_message("Serial port closed.")
 
-    def send_cmd(self, cmd, retries=5):
+    def send_cmd(self, cmd, retries=3):
         checksum = 0
         for c in cmd:
             checksum ^= ord(c)

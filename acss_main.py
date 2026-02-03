@@ -52,6 +52,7 @@ Changes:
 # Update on November 08, 2025: Enforced minimum 1s stabilization in perform_classification before sending command by looping inferences until at least 1s elapsed or consensus reached.
 # Update on February 03, 2026: Added keyboard bindings for manual control: 'a' for OVERCOOKED (left servo), 's' for STANDARD (conveyor clear), 'd' for RAW (right servo). Added more keys for full manual prototype control.
 # Update on February 03, 2026: Added joystick support with polling thread. Mapped d-pad left/X button to RAW, up/Y to STANDARD, right/B to OVERCOOKED. On manual key/joystick press, stop process, send class, wait 5s, resume process. Reassigned 'a' to toggle start/stop.
+# Update on February 03, 2026: Reassigned joystick buttons: 3 for RAW, 4 for STANDARD, 1 for OVERCOOKED, 0 for toggle start/stop. D-pad arrows unchanged. Removed joystick detection log.
 """
 
 import tkinter as tk
@@ -229,7 +230,6 @@ class ACSSGui:
         if pygame.joystick.get_count() > 0:
             self.joystick = pygame.joystick.Joystick(0)
             self.joystick.init()
-            self._log_message(f"Joystick detected: {self.joystick.get_name()}")
             self.joystick_thread = threading.Thread(target=self.joystick_loop, daemon=True)
             self.joystick_thread.start()
         else:
@@ -239,12 +239,14 @@ class ACSSGui:
         while self.running:
             for event in pygame.event.get():
                 if event.type == pygame.JOYBUTTONDOWN:
-                    if event.button == 2:  # X button (RAW)
-                        self.send_manual('RAW', log_msg="Joystick X (flapper): Manual RAW")
-                    elif event.button == 3:  # Y button (STANDARD)
+                    if event.button == 3:  # 3 for RAW
+                        self.send_manual('RAW')
+                    elif event.button == 4:  # 4 for STANDARD
                         self.send_manual('STANDARD')
-                    elif event.button == 1:  # B button (OVERCOOKED)
+                    elif event.button == 1:  # 1 for OVERCOOKED
                         self.send_manual('OVERCOOKED')
+                    elif event.button == 0:  # 0 for toggle start/stop
+                        self._toggle_process()
                 elif event.type == pygame.JOYHATMOTION:
                     if event.hat == 0:  # D-pad
                         hat_x, hat_y = event.value

@@ -60,7 +60,7 @@ Changes:
 # Update on February 03, 2026: Muted "Process started" and "Process stopped" logs to prevent repetition.
 # Update on February 03, 2026: Adjusted moisture reading from 5s to 1s. Made buttons 3/4/1 run YOLO on press like arrows (same behavior, different zones). Removed stop/resume in manual/simulate since continuous motor (stopping won't do anything). Added debounce (1s) for arrow presses to avoid double reads. Added wait/retry in simulate_camera until object detected. Added total time (HH:MM:SS) in statistics, auto-calculated.
 # Update on February 03, 2026: Shifted manual control to flapper zone only (ignore cam/YOLO). Buttons/arrows now assign fixed class (left/L/3: RAW, right/R/1: OVERCOOKED, up/Y/4: STANDARD), generate random moisture in class range, log class then 1s-delayed moisture, update stats, send class to Arduino (no YOLO, no object wait).
-# Update on February 04, 2026: Remapped joystick buttons to use test commands for servo movement: 6 for TEST_SERVO_L, 7 for TEST_SERVO_R, 4 for STANDARD classification, 0 for start/stop toggle. Added cooldown for servo tests.
+# Update on February 04, 2026: Remapped joystick buttons to use test commands for servo movement: 6 for TEST_SERVO_L (log as RAW), 7 for TEST_SERVO_R (log as OVERCOOKED), 4 for STANDARD classification, 0 for start/stop toggle. Added cooldown for servo tests. Logs class, moisture, sorted for servo buttons as well.
 """
 
 import tkinter as tk
@@ -260,13 +260,13 @@ class ACSSGui:
                     if now - self.last_button_press_time < self.button_debounce_ms:
                         continue  # Debounce
                     self.last_button_press_time = now
-                    if event.button == 6:  # 6 for TEST_SERVO_L
+                    if event.button == 6:  # 6 for TEST_SERVO_L (log as RAW)
                         if now - self.last_servo_test_time[6] >= self.servo_cooldown_ms:
-                            self.send_cmd('TEST_SERVO_L')
+                            self.manual_servo('TEST_SERVO_L', 'RAW')
                             self.last_servo_test_time[6] = now
-                    elif event.button == 7:  # 7 for TEST_SERVO_R
+                    elif event.button == 7:  # 7 for TEST_SERVO_R (log as OVERCOOKED)
                         if now - self.last_servo_test_time[7] >= self.servo_cooldown_ms:
-                            self.send_cmd('TEST_SERVO_R')
+                            self.manual_servo('TEST_SERVO_R', 'OVERCOOKED')
                             self.last_servo_test_time[7] = now
                     elif event.button == 4:  # 4 for STANDARD
                         self.simulate_flapper('STANDARD')
@@ -282,6 +282,33 @@ class ACSSGui:
                         elif hat_y == 1:  # Up (STANDARD)
                             self.simulate_flapper('STANDARD')
             time.sleep(0.05)  # Poll rate
+
+    def manual_servo(self, servo_cmd, class_str):
+        """Send servo test command, log class/moisture/sorted, update stats."""
+        category = f"{class_str.lower()}-copra"
+
+        # Random moisture in class range
+        if class_str == 'RAW':
+            moisture = round(random.uniform(7.1, 60.0), 2)
+        elif class_str == 'STANDARD':
+            moisture = round(random.uniform(6.0, 7.0), 2)
+        elif class_str == 'OVERCOOKED':
+            moisture = round(random.uniform(4.0, 5.9), 2)
+        else:
+            return  # Invalid
+
+        success = self.send_cmd(servo_cmd)
+        if success:
+            self._log_message(f"Class: {class_str}")
+            self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
+            self._log_message("Classification sorted")
+            self.copra_counter += 1
+            self.stats[category] += 1
+            self.stats['total'] += 1
+            self.moisture_sums[category] += moisture
+            self.root.after(0, self.update_stats)
+        else:
+            self._log_message("Send failed")
 
     def simulate_flapper(self, fixed_class):
         """At flapper: Assign fixed class per button, random moisture in class range, log class/delayed moisture, update stats, send class to Arduino."""

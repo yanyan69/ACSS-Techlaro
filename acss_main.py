@@ -258,11 +258,11 @@ class ACSSGui:
     def joystick_loop(self):
         while self.running:
             for event in pygame.event.get():
-                now = time.time() * 1000
-                if now - self.last_button_press_time < self.button_debounce_ms:
-                    continue  # Debounce
-                self.last_button_press_time = now
                 if event.type == pygame.JOYBUTTONDOWN:
+                    now = time.time() * 1000  # ms
+                    if now - self.last_button_press_time < self.button_debounce_ms:
+                        continue  # Debounce
+                    self.last_button_press_time = now
                     if event.button == 3:  # 3 for RAW
                         self.simulate_flapper('RAW')
                     elif event.button == 4:  # 4 for STANDARD
@@ -271,15 +271,15 @@ class ACSSGui:
                         self.simulate_flapper('OVERCOOKED')
                     elif event.button == 0:  # 0 for toggle start/stop
                         self._toggle_process()
-                    elif event.button == 6:  # 6 for TEST_SERVO_L (L pad)
-                        if now - self.last_servo_test_time[6] >= self.servo_cooldown_ms:
-                            self.send_cmd('TEST_SERVO_L')
-                            self.last_servo_test_time[6] = now
-                    elif event.button == 7:  # 7 for TEST_SERVO_R (R pad)
-                        if now - self.last_servo_test_time[7] >= self.servo_cooldown_ms:
-                            self.send_cmd('TEST_SERVO_R')
-                            self.last_servo_test_time[7] = now
+                    elif event.button == 6:  # 6 for OVERCOOKED (class instead of test)
+                        self.simulate_flapper('OVERCOOKED')
+                    elif event.button == 7:  # 7 for RAW (class instead of test)
+                        self.simulate_flapper('RAW')
                 elif event.type == pygame.JOYHATMOTION:
+                    now = time.time() * 1000
+                    if now - self.last_button_press_time < self.button_debounce_ms:
+                        continue  # Debounce
+                    self.last_button_press_time = now
                     if event.hat == 0:  # D-pad
                         hat_x, hat_y = event.value
                         if hat_x == -1:  # Left (RAW)

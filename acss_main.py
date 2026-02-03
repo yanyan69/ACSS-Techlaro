@@ -58,7 +58,7 @@ Changes:
 # Update on February 03, 2026: Added 2s cooldown for servo test buttons (6/7) to prevent spamming and protect hardware.
 # Update on February 03, 2026: Cleaned logs to only show "Process started", classification, moisture (after 5s), "sorted". No joystick logs. Changed moisture delay to 5s. For D-pad arrows (up/left/right), capture current frame, run YOLO, log real class/moisture (5s delay), send to Arduino for sorting/servo (works with/without motor).
 # Update on February 03, 2026: Muted "Process started" and "Process stopped" logs to prevent repetition.
-# Update on February 03, 2026: Adjusted moisture reading delay from 5s to 1s. Updated joystick buttons 3/4/1 to trigger servos based on last camera zone reading from arrows (up/left/right). Arrows behave the same except for zones (treated identically). Adapted for continuous motor (no stopping via TB6612FNG defect) - removed stop commands. Added wait for object detection on early arrow press, with 1s cooldown after press/moisture to avoid doubles. Added total time (HH:MM:SS) calculation in statistics.
+# Update on February 03, 2026: Adjusted moisture reading from 5s to 1s. Made buttons 3/4/1 run YOLO on press like arrows (same behavior, different zones). Removed stop/resume in manual/simulate since continuous motor (stopping won't do anything). Added debounce (1s) for arrow presses to avoid double reads. Added wait/retry in simulate_camera until object detected. Added total time (HH:MM:SS) in statistics, auto-calculated.
 """
 
 import tkinter as tk
@@ -97,7 +97,7 @@ try:
 except:
     PIL_AVAILABLE = False
 
-# ------------------ CONFIGURABLE CONSTANTS ------------------
+# ------------------ USER SETTINGS ------------------
 CAM_PREVIEW_SIZE = (640, 480)  # Higher resolution
 USERNAME = "Copra Buyer 01"
 SERIAL_PORT = "/dev/ttyUSB0"
@@ -110,7 +110,7 @@ PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 1  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
-MOISTURE_PRINT_DELAY_MS = 1000  # Adjusted to 1s as per user request
+MOISTURE_PRINT_DELAY_MS = 1000  # Updated to 1s
 
 # ---------------------------------------------------
 
@@ -186,14 +186,9 @@ class ACSSGui:
         self.last_servo_test_time = {6: 0, 7: 0}
         self.servo_cooldown_ms = 2000
 
-        # New: Last classification from camera zone (for flapper buttons)
-        self.last_class = None
-        self.last_moisture_value = None  # Store moisture for logging after flapper
-
-        # Cooldown for arrow/button presses (1s)
-        self.last_arrow_time = 0
-        self.last_button_time = 0
-        self.cooldown_s = 1.0
+        # Debounce for button presses
+        self.last_button_press_time = 0
+        self.button_debounce_ms = 1000  # 1s interval to avoid double reads
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -237,12 +232,12 @@ class ACSSGui:
         self.root.bind('<h>', lambda e: self.send_cmd('GET_DEFAULT'))    # Get default class
 
         # Joystick-style keys for manual classifications
-        self.root.bind('<Left>', lambda e: self.simulate_camera('RAW'))    # Left for RAW (simulate cam/log)
-        self.root.bind('<x>', lambda e: self.send_manual('RAW'))    # X for RAW (flapper)
-        self.root.bind('<Up>', lambda e: self.simulate_camera('STANDARD')) # Up for STANDARD (simulate cam)
-        self.root.bind('<y>', lambda e: self.send_manual('STANDARD')) # Y for STANDARD (flapper)
-        self.root.bind('<Right>', lambda e: self.simulate_camera('OVERCOOKED')) # Right for OVERCOOKED (simulate cam)
-        self.root.bind('<b>', lambda e: self.send_manual('OVERCOOKED')) # B for OVERCOOKED (flapper)
+        self.root.bind('<Left>', lambda e: self.simulate_camera())    # Left for simulation in zone
+        self.root.bind('<x>', lambda e: self.simulate_camera())       # X similar
+        self.root.bind('<Up>', lambda e: self.simulate_camera())      # Up for simulation in zone
+        self.root.bind('<y>', lambda e: self.simulate_camera())       # Y similar
+        self.root.bind('<Right>', lambda e: self.simulate_camera())   # Right for simulation in zone
+        self.root.bind('<b>', lambda e: self.simulate_camera())       # B similar
 
         # Initialize pygame for joystick
         pygame.init()
@@ -260,12 +255,8 @@ class ACSSGui:
             for event in pygame.event.get():
                 if event.type == pygame.JOYBUTTONDOWN:
                     now = time.time() * 1000  # ms
-                    if event.button == 3:  # 3 for trigger_sort (was RAW)
-                        self.trigger_sort()
-                    elif event.button == 4:  # 4 for trigger_sort (was STANDARD)
-                        self.trigger_sort()
-                    elif event.button == 1:  # 1 for trigger_sort (was OVERCOOKED)
-                        self.trigger_sort()
+                    if event.button in [1, 3, 4]:  # 1,3,4 now run simulate_camera for YOLO-based servo move
+                        self.simulate_camera()
                     elif event.button == 0:  # 0 for toggle start/stop
                         self._toggle_process()
                     elif event.button == 6:  # 6 for TEST_SERVO_L (L pad)
@@ -277,47 +268,43 @@ class ACSSGui:
                             self.send_cmd('TEST_SERVO_R')
                             self.last_servo_test_time[7] = now
                 elif event.type == pygame.JOYHATMOTION:
-                    # D-pad arrows (simulate_camera, same behavior for all zones)
-                    hat = self.joystick.get_hat(0)
-                    if hat[0] == -1:  # Left
-                        self.simulate_camera('RAW')  # Zone placeholder, same behavior
-                    elif hat[1] == 1:  # Up
-                        self.simulate_camera('STANDARD')  # Zone placeholder, same behavior
-                    elif hat[0] == 1:  # Right
-                        self.simulate_camera('OVERCOOKED')  # Zone placeholder, same behavior
+                    if event.hat == 0:  # D-pad
+                        hat_x, hat_y = event.value
+                        if hat_x != 0 or hat_y != 0:
+                            self.simulate_camera()
+            time.sleep(0.05)  # Poll rate
 
-    def simulate_camera(self, expected_class):  # expected_class ignored, all zones same
-        now = time.time()
-        if now - self.last_arrow_time < self.cooldown_s:
-            return  # Cooldown
-        self.last_arrow_time = now
+    def simulate_camera(self):
+        """Capture current frame, run YOLO until object seen (with retries), log class/moisture (1s delay), send to Arduino for servo move."""
+        now = time.time() * 1000
+        if now - self.last_button_press_time < self.button_debounce_ms:
+            return  # Debounce
+        self.last_button_press_time = now
 
-        # Wait for object detection (retry up to 5s)
-        start_wait = now
-        candidates = []
-        while time.time() - start_wait < 5.0:
-            with self.frame_lock:
-                if self.latest_frame is None:
-                    time.sleep(0.1)
-                    continue
-                frame = self.latest_frame.copy()
+        detected = False
+        for attempt in range(5):  # Retry up to 5 times to wait for object
+            try:
+                with self.frame_lock:
+                    if self.latest_frame is None:
+                        time.sleep(0.1)
+                        continue
+                    frame = self.latest_frame.copy()
 
-            results = self.yolo.track(
-                source=frame,
-                persist=True,
-                tracker=TRACKER_PATH,
-                conf=0.3,
-                max_det=1,
-                iou=0.45,
-                verbose=False
-            )
+                results = self.yolo.track(
+                    source=frame,
+                    persist=True,
+                    tracker=TRACKER_PATH,
+                    conf=0.5,
+                    max_det=1,
+                    iou=0.45,
+                    verbose=False
+                )
 
-            if results and results[0].boxes and len(results[0].boxes) > 0:
-                cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
-                conf_tensor = results[0].boxes.conf.cpu().numpy()
-                for i in range(len(cls_tensor)):
-                    cls = cls_tensor[i]
-                    conf = conf_tensor[i]
+                if results and results[0].boxes and len(results[0].boxes) > 0:
+                    cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
+                    conf_tensor = results[0].boxes.conf.cpu().numpy()
+                    cls = cls_tensor[0]
+                    conf = conf_tensor[0]
                     if conf > 0.3:
                         if cls == 1:  # raw-copra
                             moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
@@ -326,65 +313,124 @@ class ACSSGui:
                         else:  # overcooked-copra
                             moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
                         moisture = round(moisture, 2)
-                        candidates.append((cls, conf, moisture))
+                        category = self.category_map.get(cls, 'overcooked-copra')
+                        class_str = category.upper().replace('-COPRA', '')
+                        self._log_message(f"Class: {class_str}")
+                        self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
+                        self.manual_id_counter += 1
+                        id = self.manual_id_counter
+                        success = self.send_cmd(f"{class_str}")
+                        if success:
+                            self._log_message("Classification sorted")
+                        detected = True
+                        break
+            except Exception as e:
+                print(f"YOLO error: {e}")
+            time.sleep(0.2)  # Wait before retry
 
-            if candidates:
-                break  # Detection found
-            time.sleep(0.1)
+        if not detected:
+            self._log_message("No object detected after retries → Skipping")
 
-        if candidates:
-            class_counts = Counter([c[0] for c in candidates])
-            most_common_cls = class_counts.most_common(1)[0][0]
-            filtered = [c for c in candidates if c[0] == most_common_cls]
-            filtered.sort(key=lambda x: x[1], reverse=True)
-            cls, conf, moisture = filtered[0]
-
-            category = self.category_map.get(cls, 'overcooked-copra')
-            class_str = category.upper().replace('-COPRA', '')
-            cat_name = category.split('-')[0].capitalize()
-
-            self.last_class = class_str
-            self.last_moisture_value = moisture
-
-            self._log_message(f"Class: {cat_name.upper()}")
-            self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
-
-            # Update stats (but don't send to Arduino yet - wait for flapper button)
-            self.stats[category] += 1
-            self.stats['total'] += 1
-            self.moisture_sums[category] += moisture
-            self.root.after(0, self.update_stats)
+    def _on_tab_changed(self, event):
+        notebook = event.widget
+        selected_tab = notebook.select()
+        if notebook.tab(selected_tab, "text") == "About":
+            self.min_max_btn.place(relx=0.95, rely=0.95, anchor='se')
         else:
-            self._log_message("No object detected after wait.")
+            self.min_max_btn.place_forget()
 
-    def trigger_sort(self):
-        now = time.time()
-        if now - self.last_button_time < self.cooldown_s:
-            return  # Cooldown
-        self.last_button_time = now
-
-        if self.last_class:
-            id = str(self.manual_id_counter)  # Dummy ID
-            self.manual_id_counter += 1
-            success = self.send_cmd(f"{self.last_class},{id}")
-            if success:
-                self._log_message("Classification sorted")
-                # No additional moisture log - already done after classification
-            else:
-                self._log_message("Send failed → Defaulting to OVERCOOKED")
-                self.send_cmd(f"OVERCOOKED,{id}")
-        else:
-            self._log_message("No recent camera reading - perform classification first.")
-
-    def send_manual(self, class_str):  # Legacy, but remap to trigger_sort for consistency
-        self.trigger_sort()
+    def _toggle_fullscreen(self):
+        is_fullscreen = self.root.attributes('-fullscreen')
+        self.root.attributes('-fullscreen', not is_fullscreen)
+        self.min_max_btn.config(text="Minimize" if not is_fullscreen else "Maximize")
+        if is_fullscreen:
+            self.root.geometry("1024x600")
 
     def _build_home_tab(self):
-        # Assuming original implementation - placeholder
-        pass  # Replace with actual code from original
+        frm = tk.Frame(self.home_tab)
+        frm.pack(fill="both", expand=True, padx=8, pady=8)
+        frm.rowconfigure(0, weight=1)
+        frm.columnconfigure(0, weight=3)
+        frm.columnconfigure(1, weight=2)
+
+        left_frame = tk.Frame(frm)
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        left_frame.rowconfigure(0, weight=1)
+        left_frame.rowconfigure(1, weight=0)
+        left_frame.columnconfigure(0, weight=1)
+
+        cam_frame = tk.LabelFrame(left_frame, text="Camera Preview")
+        cam_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.cam_canvas = tk.Canvas(cam_frame, width=CAM_PREVIEW_SIZE[0],
+                                    height=CAM_PREVIEW_SIZE[1], bg='black')
+        self.cam_canvas.pack(padx=4, pady=4)
+
+        self.process_btn = tk.Button(left_frame, text="Start Process",
+                                    font=("Arial", 14, "bold"), bg="green", fg="white",
+                                    command=self._toggle_process)
+        self.process_btn.grid(row=1, column=0, sticky="ew", padx=4, pady=8)
+
+        if not PICAMERA2_AVAILABLE or not ULTRALYTICS_AVAILABLE:
+            self.process_btn.config(state='disabled')
+
+        log_frame = tk.LabelFrame(frm, text="Log")
+        log_frame.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
+        self.log = scrolledtext.ScrolledText(log_frame, state='disabled', wrap='word', height=20, width=40)
+        self.log.pack(fill='both', expand=True)
+
+        # Button frame for Clear and Copy Log buttons
+        button_frame = tk.Frame(log_frame)
+        button_frame.pack(pady=5)
+
+        clear_log_btn = tk.Button(button_frame, text="Clear Log", command=self._clear_log)
+        clear_log_btn.pack(side=tk.LEFT, padx=5)
+
+        copy_log_btn = tk.Button(button_frame, text="Copy Log", command=self._copy_log)
+        copy_log_btn.pack(side=tk.LEFT, padx=5)
+
+    def _clear_log(self):
+        self.log.config(state='normal')
+        self.log.delete('1.0', tk.END)
+        self.log.config(state='disabled')
+
+    def _copy_log(self):
+        text = self.log.get('1.0', tk.END).strip()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        messagebox.showinfo("Copy Log", "Log copied to clipboard!")
+
+    def _toggle_process(self):
+        if not self.process_running:
+            if not self.serial or not self.serial.is_open:
+                return
+            if not self.yolo:
+                return
+            if not self.camera_running:
+                return
+            self.process_btn.config(text="Stop Process", bg="red")
+            self.start_process()
+            self.process_running = True
+        else:
+            self.process_btn.config(text="Start Process", bg="green")
+            self.stop_process()
+            self.process_running = False
+
+    def _log_message(self, msg, console_only=False):
+        print(msg)
+        if console_only:
+            return
+        ts = time.strftime("%H:%M:%S")
+        full_msg = f"[{ts}] {msg}"
+        self.log.config(state='normal')
+        self.log.insert("end", full_msg + "\n")
+        self.log.see("end")
+        self.log.config(state='disabled')
 
     def _build_statistics_tab(self):
-        stats_frame = ttk.LabelFrame(self.statistics_tab, text="Statistics")
+        frm = tk.Frame(self.statistics_tab)
+        frm.pack(fill="both", expand=True, padx=8, pady=8)
+
+        stats_frame = tk.LabelFrame(frm, text="Processing Statistics")
         stats_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         stats_frame.columnconfigure(0, weight=1)
@@ -424,12 +470,25 @@ class ACSSGui:
         self.end_time_label = tk.Label(stats_frame, text="N/A")
         self.end_time_label.grid(row=row_offset+3, column=1, padx=8, pady=4)
 
-        tk.Label(stats_frame, text="Total Time (HH:MM:SS):", font=("Arial", 10, "bold")).grid(row=row_offset+4, column=0, padx=8, pady=4, sticky="w")
+        tk.Label(stats_frame, text="Total Time:", font=("Arial", 10, "bold")).grid(row=row_offset+4, column=0, padx=8, pady=4, sticky="w")
         self.total_time_label = tk.Label(stats_frame, text="00:00:00")
         self.total_time_label.grid(row=row_offset+4, column=1, padx=8, pady=4)
 
         reset_btn = tk.Button(stats_frame, text="Reset Statistics", command=self._reset_stats)
         reset_btn.grid(row=row_offset+5, column=0, columnspan=3, pady=10)
+
+    def _reset_stats(self):
+        self.stats = {
+            'raw-copra': 0,
+            'standard-copra': 0,
+            'overcooked-copra': 0,
+            'total': 0,
+            'start_time': None,
+            'end_time': None
+        }
+        self.moisture_sums = {'raw-copra': 0.0, 'standard-copra': 0.0, 'overcooked-copra': 0.0}
+        self.update_stats()
+        self._log_message("Statistics reset.")
 
     def _build_about_tab(self):
         frm = tk.Frame(self.about_tab)
@@ -448,7 +507,7 @@ class ACSSGui:
         frm = tk.Frame(self.exit_tab)
         frm.pack(fill="both", expand=True, padx=8, pady=8)
 
-        tk.Label(frm, text="Are you sure you want to want to exit?", font=("Arial", 14, "bold")).pack(pady=20)
+        tk.Label(frm, text="Are you sure you want to exit?", font=("Arial", 14, "bold")).pack(pady=20)
         exit_btn = tk.Button(frm, text="Exit", font=("Arial", 12), bg="red", fg="white", command=self.root.quit)
         exit_btn.pack(pady=10)
         cancel_btn = tk.Button(frm, text="Cancel", font=("Arial", 12), command=lambda: self.root.quit())  # Placeholder
@@ -590,7 +649,7 @@ class ACSSGui:
             self.last_sent_class = class_str
             self.last_sent_id = str(id)
 
-            success = self.send_cmd(f"{class_str},{id}")
+            success = self.send_cmd(f"{class_str}")
             if success:
                 self.copra_counter += 1
                 cat_name = category.split('-')[0].capitalize()
@@ -602,10 +661,10 @@ class ACSSGui:
                 self.root.after(0, self.update_stats)
             else:
                 self._log_message("All send retries failed → Defaulting to OVERCOOKED")
-                self.send_cmd(f"OVERCOOKED,{id}")
+                self.send_cmd(f"OVERCOOKED")
         else:
             self._log_message("No detection after retries → Sending DEFAULT to Arduino")
-            self.send_cmd(f"DEFAULT,{id}")
+            self.send_cmd(f"DEFAULT")
 
     def start_process(self):
         try:
@@ -613,7 +672,7 @@ class ACSSGui:
                 return
             if not self.yolo:
                 return
-            self.send_cmd("AUTO_ENABLE")  # No stop, continuous motor
+            self.send_cmd("AUTO_ENABLE")
             self.stats['start_time'] = time.time()
             self.stats['end_time'] = None
             self.serial_error_logged = False
@@ -624,7 +683,7 @@ class ACSSGui:
 
     def stop_process(self):
         try:
-            # No AUTO_DISABLE send - continuous motor, no stopping
+            self.send_cmd("AUTO_DISABLE")
             self.stats['end_time'] = time.time()
             self.serial_error_logged = False
             self.frame_drop_logged = False
@@ -747,53 +806,20 @@ class ACSSGui:
             self.start_time_label.config(text=start_str)
             self.end_time_label.config(text=end_str)
 
-            # Calculate total time
+            # Auto calculate total time
             if self.stats['start_time']:
-                end = self.stats['end_time'] if self.stats['end_time'] else time.time()
-                total_seconds = int(end - self.stats['start_time'])
-                hours = total_seconds // 3600
-                mins = (total_seconds % 3600) // 60
-                secs = total_seconds % 60
-                self.total_time_label.config(text=f"{hours:02d}:{mins:02d}:{secs:02d}")
+                end_time = self.stats['end_time'] if self.stats['end_time'] else time.time()
+                total_sec = int(end_time - self.stats['start_time'])
+                hours = total_sec // 3600
+                mins = (total_sec % 3600) // 60
+                secs = total_sec % 60
+                self.total_time_label.config(text=f"{hours:02}:{mins:02}:{secs:02}")
             else:
                 self.total_time_label.config(text="00:00:00")
 
             self.root.update()
         except Exception as e:
             pass
-
-    def _reset_stats(self):
-        self.stats = {
-            'raw-copra': 0,
-            'standard-copra': 0,
-            'overcooked-copra': 0,
-            'total': 0,
-            'start_time': None,
-            'end_time': None
-        }
-        self.moisture_sums = {'raw-copra': 0.0, 'standard-copra': 0.0, 'overcooked-copra': 0.0}
-        self.update_stats()
-        self._log_message("Statistics reset.")
-
-    def _toggle_process(self):
-        if self.process_running:
-            self.stop_process()
-            self.process_running = False
-        else:
-            self.start_process()
-            self.process_running = True
-
-    def _toggle_fullscreen(self):
-        # Placeholder for toggle fullscreen/minimize
-        pass
-
-    def _on_tab_changed(self, event):
-        # Placeholder for tab change handler
-        pass
-
-    def _log_message(self, msg, console_only=False):
-        # Placeholder for logging
-        print(msg)
 
     def on_close(self):
         self.running = False

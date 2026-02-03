@@ -57,6 +57,7 @@ Changes:
 # Update on February 03, 2026: Added joystick buttons 6 (L pad) for TEST_SERVO_L, 7 (R pad) for TEST_SERVO_R to test servo responsiveness.
 # Update on February 03, 2026: Added 2s cooldown for servo test buttons (6/7) to prevent spamming and protect hardware.
 # Update on February 03, 2026: Cleaned logs to only show "Process started", classification, moisture (after 5s), "sorted". No joystick logs. Changed moisture delay to 5s. For D-pad arrows (up/left/right), capture current frame, run YOLO, log real class/moisture (5s delay), send to Arduino for sorting/servo (works with/without motor).
+# Update on February 03, 2026: Muted "Process started" and "Process stopped" logs to prevent repetition.
 """
 
 import tkinter as tk
@@ -227,11 +228,11 @@ class ACSSGui:
 
         # Joystick-style keys for manual classifications
         self.root.bind('<Left>', lambda e: self.simulate_camera('RAW'))    # Left for RAW (simulate cam/log)
-        self.root.bind('<x>', lambda e: self.send_manual('RAW', log_msg="Flapper zone: Manual RAW"))    # X for RAW (flapper)
+        self.root.bind('<x>', lambda e: self.send_manual('RAW'))    # X for RAW (flapper)
         self.root.bind('<Up>', lambda e: self.simulate_camera('STANDARD')) # Up for STANDARD (simulate cam)
-        self.root.bind('<y>', lambda e: self.send_manual('STANDARD', log_msg="Flapper zone: Manual STANDARD")) # Y for STANDARD (flapper)
+        self.root.bind('<y>', lambda e: self.send_manual('STANDARD')) # Y for STANDARD (flapper)
         self.root.bind('<Right>', lambda e: self.simulate_camera('OVERCOOKED')) # Right for OVERCOOKED (simulate cam)
-        self.root.bind('<b>', lambda e: self.send_manual('OVERCOOKED', log_msg="Flapper zone: Manual OVERCOOKED")) # B for OVERCOOKED (flapper)
+        self.root.bind('<b>', lambda e: self.send_manual('OVERCOOKED')) # B for OVERCOOKED (flapper)
 
         # Initialize pygame for joystick
         pygame.init()
@@ -242,7 +243,7 @@ class ACSSGui:
             self.joystick_thread = threading.Thread(target=self.joystick_loop, daemon=True)
             self.joystick_thread.start()
         else:
-            self._log_message("No joystick detected.")
+            pass  # No log
 
     def joystick_loop(self):
         while self.running:
@@ -261,14 +262,10 @@ class ACSSGui:
                         if now - self.last_servo_test_time[6] >= self.servo_cooldown_ms:
                             self.send_cmd('TEST_SERVO_L')
                             self.last_servo_test_time[6] = now
-                        else:
-                            pass  # No log for cooldown
                     elif event.button == 7:  # 7 for TEST_SERVO_R (R pad)
                         if now - self.last_servo_test_time[7] >= self.servo_cooldown_ms:
                             self.send_cmd('TEST_SERVO_R')
                             self.last_servo_test_time[7] = now
-                        else:
-                            pass  # No log for cooldown
                 elif event.type == pygame.JOYHATMOTION:
                     if event.hat == 0:  # D-pad
                         hat_x, hat_y = event.value
@@ -320,26 +317,19 @@ class ACSSGui:
                     id = self.manual_id_counter
                     success = self.send_cmd(f"{class_str},{id}")
                     if success:
-                        self._log_message(f"Classification sorted")
+                        self._log_message("Classification sorted")
         finally:
             self.root.after(5000, self.start_process)  # Resume after 5s
 
-    def send_manual(self, class_str, log_msg=None):
+    def send_manual(self, class_str):
         """Send manual classification command to Arduino, with stop-wait-resume."""
         if not self.serial or not self.serial.is_open:
-            self._log_message("Error: Serial not open for manual command.")
             return
         self.manual_id_counter += 1
         id = self.manual_id_counter  # Use incremental dummy ID
         self.stop_process()  # Stop auto process
         success = self.send_cmd(f"{class_str},{id}")
-        if success:
-            msg = log_msg or f"Manual send: {class_str} (ID: {id}) - Triggering flapper/sorting."
-            self._log_message(msg)
-            self.root.after(5000, self.start_process)  # Resume after 5s
-        else:
-            self._log_message(f"Manual send failed: {class_str} (ID: {id})")
-            self.root.after(5000, self.start_process)  # Still resume
+        self.root.after(5000, self.start_process)  # Resume after 5s
 
     def _on_tab_changed(self, event):
         notebook = event.widget
@@ -412,21 +402,16 @@ class ACSSGui:
     def _toggle_process(self):
         if not self.process_running:
             if not self.serial or not self.serial.is_open:
-                self._log_message("Error: Serial port not open. Check connection.")
                 return
             if not self.yolo:
-                self._log_message("Error: YOLO model not loaded.")
                 return
             if not self.camera_running:
-                self._log_message("Error: Camera not running.")
                 return
             self.process_btn.config(text="Stop Process", bg="red")
-            self._log_message("System Started")
             self.start_process()
             self.process_running = True
         else:
             self.process_btn.config(text="Start Process", bg="green")
-            self._log_message("System Stopped")
             self.stop_process()
             self.process_running = False
 
@@ -680,10 +665,8 @@ class ACSSGui:
     def start_process(self):
         try:
             if not (self.serial and self.serial.is_open):
-                self._log_message("Error: Serial port not open. Check connection.")
                 return
             if not self.yolo:
-                self._log_message("Error: YOLO model not loaded.")
                 return
             self.send_cmd("AUTO_ENABLE")
             self.stats['start_time'] = time.time()
@@ -691,9 +674,8 @@ class ACSSGui:
             self.serial_error_logged = False
             self.frame_drop_logged = False
             self.last_ping_time = time.time()
-            self._log_message("Process started")
         except Exception as e:
-            self._log_message(f"Start process error: {e}")
+            pass
 
     def stop_process(self):
         try:
@@ -701,17 +683,15 @@ class ACSSGui:
             self.stats['end_time'] = time.time()
             self.serial_error_logged = False
             self.frame_drop_logged = False
-            self._log_message("Process stopped")
             self.root.after(0, self.update_stats)
         except Exception as e:
-            self._log_message(f"Stop process error: {e}")
+            pass
 
     def start_camera(self):
         if self.camera_running:
             print("Camera already running.")
             return
         if not PICAMERA2_AVAILABLE:
-            self._log_message("Error: picamera2 not available.")
             self.process_btn.config(state='disabled')
             return
         try:
@@ -725,9 +705,7 @@ class ACSSGui:
             self.camera_running = True
             self.camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
             self.camera_thread.start()
-            self._log_message("Camera started.")
         except Exception as e:
-            self._log_message(f"Camera start failed: {e}")
             self.process_btn.config(state='disabled')
 
     def stop_camera(self):
@@ -739,9 +717,8 @@ class ACSSGui:
             if self.picam2:
                 self.picam2.stop()
                 self.picam2 = None
-            self._log_message("Camera stopped.")
         except Exception as e:
-            self._log_message(f"Camera stop error: {e}")
+            pass
 
     def camera_loop(self):
         frame_counter = 0
@@ -792,7 +769,6 @@ class ACSSGui:
 
                 time.sleep(0.02)
             except Exception as e:
-                self._log_message(f"Camera loop error: {e}")
                 time.sleep(0.2)
 
     def update_canvas_with_frame(self, bgr_frame):
@@ -807,7 +783,7 @@ class ACSSGui:
                 cv2.imshow("Camera Preview", bgr_frame)
                 cv2.waitKey(1)
         except Exception as e:
-            self._log_message(f"Display frame error: {e}")
+            pass
 
     def update_stats(self):
         try:
@@ -827,7 +803,7 @@ class ACSSGui:
             self.end_time_label.config(text=end_str)
             self.root.update()
         except Exception as e:
-            self._log_message(f"Stats update error: {e}")
+            pass
 
     def on_close(self):
         self.running = False
@@ -836,7 +812,6 @@ class ACSSGui:
         self.stop_process()
         self.stop_camera()
         self.close_serial()
-        self._log_message("Application closed.")
         self.root.destroy()
 
 if __name__ == "__main__":

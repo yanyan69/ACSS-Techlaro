@@ -50,15 +50,12 @@ Changes:
 # Update on November 08, 2025: Adjusted copra # display to start from 1 (offset Arduino ID by +1 in logs). Added constant MOISTURE_PRINT_DELAY_MS = 2000 (2s delay after class log for moisture print). Scheduled moisture log with root.after for safe, non-disruptive delay.
 # Update on November 08, 2025: Added iou=0.45 to YOLO track calls in perform_classification and camera_loop to reduce overlapping bounding boxes via stricter NMS.
 # Update on November 08, 2025: Enforced minimum 1s stabilization in perform_classification before sending command by looping inferences until at least 1s elapsed or consensus reached.
-# Update on February 03, 2026: Added keyboard bindings for manual control: 'a' for OVERCOOKED (left servo), 's' for STANDARD (conveyor clear), 'd' for RAW (right servo). Added more keys for full manual prototype control.
-# Update on February 03, 2026: Added joystick support with polling thread. Mapped d-pad left/X button to RAW, up/Y to STANDARD, right/B to OVERCOOKED. On manual key/joystick press, stop process, send class, wait 5s, resume process. Reassigned 'a' to toggle start/stop.
 """
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import sys, threading, time
 from collections import Counter
-import pygame  # Added for joystick support
 
 # Optional imports (graceful degradation)
 try:
@@ -171,9 +168,6 @@ class ACSSGui:
         self.last_sent_class = None  # For sync check
         self.last_sent_id = None
 
-        # Manual control counter (for dummy IDs in manual sends)
-        self.manual_id_counter = 0
-
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
             try:
@@ -204,74 +198,6 @@ class ACSSGui:
                                      font=("Arial", 10), bg="gray", fg="white")
         self.min_max_btn.place(relx=0.95, rely=0.95, anchor='se')
         self.min_max_btn.place_forget()
-
-        # Add keyboard bindings for manual control
-        self.root.bind('<a>', lambda e: self._toggle_process())  # Toggle start/stop
-        self.root.bind('<p>', lambda e: self.send_cmd('PING'))           # Ping Arduino
-        self.root.bind('<e>', lambda e: self.send_cmd('EMERGENCY_STOP')) # Emergency stop
-        self.root.bind('<r>', lambda e: self.send_cmd('RESET'))          # Reset system
-        self.root.bind('<t>', lambda e: self.send_cmd('TEST_SERVO_L'))   # Test left servo
-        self.root.bind('<y>', lambda e: self.send_cmd('TEST_SERVO_R'))   # Test right servo
-        self.root.bind('<g>', lambda e: self.send_cmd('GET_CAM_DIST'))   # Get camera distance
-        self.root.bind('<h>', lambda e: self.send_cmd('GET_DEFAULT'))    # Get default class
-
-        # Joystick-style keys for manual classifications
-        self.root.bind('<Left>', lambda e: self.send_manual('RAW', log_msg="Camera zone: Manual RAW"))  # Left for RAW (camera/log)
-        self.root.bind('<x>', lambda e: self.send_manual('RAW', log_msg="Flapper zone: Manual RAW"))    # X for RAW (flapper)
-        self.root.bind('<Up>', lambda e: self.send_manual('STANDARD'))                                  # Up for STANDARD
-        self.root.bind('<y>', lambda e: self.send_manual('STANDARD'))                                   # Y for STANDARD
-        self.root.bind('<Right>', lambda e: self.send_manual('OVERCOOKED'))                             # Right for OVERCOOKED
-        self.root.bind('<b>', lambda e: self.send_manual('OVERCOOKED'))                                 # B for OVERCOOKED
-
-        # Initialize pygame for joystick
-        pygame.init()
-        pygame.joystick.init()
-        if pygame.joystick.get_count() > 0:
-            self.joystick = pygame.joystick.Joystick(0)
-            self.joystick.init()
-            self._log_message(f"Joystick detected: {self.joystick.get_name()}")
-            self.joystick_thread = threading.Thread(target=self.joystick_loop, daemon=True)
-            self.joystick_thread.start()
-        else:
-            self._log_message("No joystick detected.")
-
-    def joystick_loop(self):
-        while self.running:
-            for event in pygame.event.get():
-                if event.type == pygame.JOYBUTTONDOWN:
-                    if event.button == 2:  # X button (RAW)
-                        self.send_manual('RAW', log_msg="Joystick X (flapper): Manual RAW")
-                    elif event.button == 3:  # Y button (STANDARD)
-                        self.send_manual('STANDARD')
-                    elif event.button == 1:  # B button (OVERCOOKED)
-                        self.send_manual('OVERCOOKED')
-                elif event.type == pygame.JOYHATMOTION:
-                    if event.hat == 0:  # D-pad
-                        hat_x, hat_y = event.value
-                        if hat_x == -1:  # Left (RAW, camera/log)
-                            self.send_manual('RAW', log_msg="Joystick Left (camera): Manual RAW")
-                        elif hat_x == 1:  # Right (OVERCOOKED)
-                            self.send_manual('OVERCOOKED')
-                        elif hat_y == 1:  # Up (STANDARD)
-                            self.send_manual('STANDARD')
-            time.sleep(0.05)  # Poll rate
-
-    def send_manual(self, class_str, log_msg=None):
-        """Send manual classification command to Arduino, with stop-wait-resume."""
-        if not self.serial or not self.serial.is_open:
-            self._log_message("Error: Serial not open for manual command.")
-            return
-        self.manual_id_counter += 1
-        id = self.manual_id_counter  # Use incremental dummy ID
-        self.stop_process()  # Stop auto process
-        success = self.send_cmd(f"{class_str},{id}")
-        if success:
-            msg = log_msg or f"Manual send: {class_str} (ID: {id}) - Triggering flapper/sorting."
-            self._log_message(msg)
-            self.root.after(5000, self.start_process)  # Resume after 5s
-        else:
-            self._log_message(f"Manual send failed: {class_str} (ID: {id})")
-            self.root.after(5000, self.start_process)  # Still resume
 
     def _on_tab_changed(self, event):
         notebook = event.widget
@@ -405,210 +331,319 @@ class ACSSGui:
         self.total_pieces_label = tk.Label(stats_frame, text="0")
         self.total_pieces_label.grid(row=row_offset, column=1, padx=8, pady=4)
 
-        tk.Label(stats_frame, text="Total Avg. Moisture:", font=("Arial", 10, "bold")).grid(row=row_offset+1, column=0, padx=8, pady=4, sticky="w")
+        tk.Label(stats_frame, text="Total Avg Moisture:", font=("Arial", 10, "bold")).grid(row=row_offset+1, column=0, padx=8, pady=4, sticky="w")
         self.total_moisture_label = tk.Label(stats_frame, text="0.00%")
         self.total_moisture_label.grid(row=row_offset+1, column=1, padx=8, pady=4)
 
-        tk.Label(stats_frame, text="Start Time:", font=("Arial", 10, "bold")).grid(row=row_offset+2, column=0, padx=8, pady=4, sticky="w")
+        tk.Label(stats_frame, text="Processing Start Time:", font=("Arial", 10, "bold")).grid(row=row_offset+2, column=0, padx=8, pady=4, sticky="w")
         self.start_time_label = tk.Label(stats_frame, text="N/A")
         self.start_time_label.grid(row=row_offset+2, column=1, padx=8, pady=4)
 
-        tk.Label(stats_frame, text="End Time:", font=("Arial", 10, "bold")).grid(row=row_offset+3, column=0, padx=8, pady=4, sticky="w")
+        tk.Label(stats_frame, text="Processing End Time:", font=("Arial", 10, "bold")).grid(row=row_offset+3, column=0, padx=8, pady=4, sticky="w")
         self.end_time_label = tk.Label(stats_frame, text="N/A")
         self.end_time_label.grid(row=row_offset+3, column=1, padx=8, pady=4)
 
-        reset_btn = tk.Button(stats_frame, text="Reset Statistics", command=self._reset_stats)
-        reset_btn.grid(row=row_offset+4, column=0, columnspan=3, pady=10)
+        tk.Button(stats_frame, text="Reset Statistics", font=("Arial", 10), command=self._reset_stats).grid(row=row_offset+4, column=0, columnspan=3, pady=10)
 
     def _reset_stats(self):
-        self.stats = {
-            'raw-copra': 0,
-            'standard-copra': 0,
-            'overcooked-copra': 0,
-            'total': 0,
-            'start_time': None,
-            'end_time': None
-        }
-        self.moisture_sums = {'raw-copra': 0.0, 'standard-copra': 0.0, 'overcooked-copra': 0.0}
+        self.send_cmd("RESET")
+        for cat in ["raw-copra", "standard-copra", "overcooked-copra"]:
+            self.stats[cat] = 0
+            self.moisture_sums[cat] = 0.0
+        self.stats['total'] = 0
+        self.stats['start_time'] = None
+        self.stats['end_time'] = None
+        self.copra_counter = 0
+        self.moistures = {}
         self.update_stats()
-        self._log_message("Statistics reset.")
+        self._log_message("Statistics and Arduino state reset.")
 
     def _build_about_tab(self):
         frm = tk.Frame(self.about_tab)
-        frm.pack(fill="both", expand=True, padx=8, pady=8)
+        frm.pack(fill="both", expand=True, padx=10, pady=10)
 
-        about_text = (
-            "Automated Copra Segregation System (ACSS)\n\n"
-            "Version: 1.0\n\n"
-            "Developed by: xAI Team\n\n"
-            "This system automates the classification and sorting of copra using AI and sensors.\n"
-            "For more information, contact support@xai.com"
+        canvas = tk.Canvas(frm)
+        scrollbar = ttk.Scrollbar(frm, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
-        tk.Label(frm, text=about_text, font=("Arial", 12), justify="left").pack(pady=20)
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        about_frame = tk.LabelFrame(scrollable_frame, text="About ACSS", font=("Arial", 14, "bold"))
+        about_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        tk.Label(about_frame, text="Automated Copra Segregation System", font=("Arial", 16, "bold")).pack(pady=5)
+        tk.Label(about_frame, text="Version: 1.0\nDeveloped for Practice and Design 2\nMarinduque State University, 2025",
+                font=("Arial", 12), justify="center").pack(pady=5)
+
+        try:
+            img = Image.open("resources/profiles/acss-3d.png")
+            img = img.resize((200, 200), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            img_label = tk.Label(about_frame, image=photo)
+            img_label.image = photo
+            img_label.pack(pady=10)
+        except Exception as e:
+            tk.Label(about_frame, text="Image placeholder (acss-3d.png)", bg="gray", font=("Arial", 12)).pack(pady=10)
+
+        tk.Label(about_frame, text="Project Description", font=("Arial", 14, "bold")).pack(anchor="w", pady=10)
+        tk.Label(about_frame,
+                text=" The Automated Copra Segregation System (ACSS) is a prototype designed to help sort copra based on its quality using a camera and sensors. The system classifies copra into three types: Raw, Standard, and Overcooked, as it moves along a conveyor. By automating this process, the system aims to lessen manual work, make sorting faster, and provide a more consistent way to assess copra quality.",
+                font=("Arial", 12), justify="left", wraplength=900).pack(pady=5)
+
+        tk.Label(about_frame, text="Objectives", font=("Arial", 14, "bold")).pack(anchor="w", pady=10)
+        objectives = [
+            "a) Improve efficiency in copra processing by automating classification and sorting.",
+            "b) Reduce manual labor and human error in quality assessment.",
+            "c) Enhance accuracy using computer vision (YOLO) and sensor data for real-time decisions."
+        ]
+        for obj in objectives:
+            tk.Label(about_frame, text=obj, font=("Arial", 12), justify="left").pack(anchor="w", padx=20, pady=2)
+
+        tk.Label(about_frame, text="Development Team", font=("Arial", 14, "bold")).pack(anchor="w", pady=10)
+        team_frame = tk.Frame(about_frame)
+        team_frame.pack(pady=10)
+
+        team_members = [
+            ("jerald.png", "Jerald", "Project Lead & Systems Integrator"),
+            ("christian.png", "Christian", "Software & Electronics Developer"),
+            ("johnpaul.png", "John Paul", "Mechanical Design & Fabrication Engineer"),
+            ("marielle.png", "Marielle", "Technical Documentation & Quality Analyst")
+        ]
+
+        for i, (img_path, name, title) in enumerate(team_members):
+            member_frame = tk.Frame(team_frame)
+            member_frame.grid(row=i//2, column=i%2, padx=20, pady=10, sticky="n")
+
+            try:
+                img = Image.open(f"resources/profiles/{img_path}")
+                img = img.resize((100, 100), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                img_label = tk.Label(member_frame, image=photo)
+                img_label.image = photo
+                img_label.pack()
+            except Exception as e:
+                tk.Label(member_frame, text=f"{name} Image", bg="gray", font=("Arial", 10)).pack()
+
+            tk.Label(member_frame, text=name, font=("Arial", 12, "bold")).pack(pady=2)
+            tk.Label(member_frame, text=title, font=("Arial", 10)).pack()
 
     def _build_exit_tab(self):
         frm = tk.Frame(self.exit_tab)
         frm.pack(fill="both", expand=True, padx=8, pady=8)
 
-        tk.Label(frm, text="Are you sure you want to exit?", font=("Arial", 14, "bold")).pack(pady=20)
-        exit_btn = tk.Button(frm, text="Exit", font=("Arial", 12), bg="red", fg="white", command=self.root.quit)
-        exit_btn.pack(pady=10)
-        cancel_btn = tk.Button(frm, text="Cancel", font=("Arial", 12), command=lambda: self.root.quit())  # Placeholder
-        cancel_btn.pack(pady=10)
+        exit_frame = tk.LabelFrame(frm, text="Exit Application")
+        exit_frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+        tk.Label(exit_frame, text="Click the button below to close the program.",
+                font=("Arial", 12)).pack(pady=20)
+
+        tk.Button(exit_frame, text="Exit Program", fg="white", bg="red",
+                font=("Arial", 14, "bold"), width=20,
+                command=self._exit_program).pack(pady=30)
+
+    def _exit_program(self):
+        if messagebox.askokcancel("Exit", "Are you sure you want to exit?"):
+            self.stop_process()
+            self.stop_camera()
+            self.close_serial()
+            self.on_close()
 
     def open_serial(self):
-        if SERIAL_AVAILABLE:
-            try:
-                self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
-                self.serial_reader_thread_obj = threading.Thread(target=self.serial_reader_thread, daemon=True)
-                self.serial_reader_thread_obj.start()
-                self._log_message("Serial port opened successfully.")
-                self.send_cmd("GET_DEFAULT")  # Query default on start
-            except Exception as e:
-                self._log_message(f"Serial open failed: {e}")
-                self.process_btn.config(state='disabled')
+        try:
+            if not SERIAL_AVAILABLE:
+                self._log_message("Error: pyserial not installed.")
+                return
+            if self.serial and self.serial.is_open:
+                print("Serial already open.")
+                return
+            self.serial = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
+            self._log_message(f"Connected to Arduino on {SERIAL_PORT}@{SERIAL_BAUD}")
+            self.serial_reader_thread_obj = threading.Thread(target=self.serial_reader_thread, daemon=True)
+            self.serial_reader_thread_obj.start()
+            self.ping_thread = threading.Thread(target=self.ping_loop, daemon=True)
+            self.ping_thread.start()
+            self.cam_poll_thread = threading.Thread(target=self.cam_dist_poll_loop, daemon=True)
+            self.cam_poll_thread.start()
+            print("Serial reader, ping, and cam poll threads started.")
+            # Query Arduino default on connect
+            self.send_cmd("GET_DEFAULT")
+        except Exception as e:
+            self._log_message(f"Failed to connect to Arduino: {e}")
 
     def close_serial(self):
-        if self.serial and self.serial.is_open:
-            self.serial.close()
-            self._log_message("Serial port closed.")
+        try:
+            if self.serial and self.serial.is_open:
+                self.send_cmd("RESET")
+                self.serial.close()
+                self._log_message("Serial connection closed.")
+        except Exception as e:
+            self._log_message(f"Error closing serial: {e}")
 
-    def send_cmd(self, cmd, retries=3):
-        checksum = 0
-        for c in cmd:
-            checksum ^= ord(c)
-        full_cmd = f"{cmd}|{checksum}\n"
-        with self.serial_lock:
-            for _ in range(retries):
-                try:
-                    self.serial.write(full_cmd.encode())
+    def send_cmd(self, text, retries=3):
+        attempt = 0
+        while attempt < retries:
+            try:
+                if not self.serial or not self.serial.is_open:
+                    self._log_message(f"Serial not open — can't send: {text}")
+                    return False
+                checksum = 0
+                for char in text:
+                    checksum ^= ord(char)
+                full_cmd = (text.strip().upper() + f"|{checksum}\n").encode('utf-8')
+                with self.serial_lock:
+                    self.serial.write(full_cmd)
                     self.serial.flush()
-                    return True
-                except Exception as e:
-                    self._log_message(f"Send cmd retry failed: {e}")
-                    time.sleep(0.1)
+                print(f"Sent to Arduino: {text} with checksum {checksum}")
+                return True
+            except Exception as e:
+                self._log_message(f"Failed to send command '{text}' (attempt {attempt+1}): {e}")
+                attempt += 1
+                time.sleep(0.5)
         return False
 
+    def ping_loop(self):
+        while self.running and self.serial and self.serial.is_open:
+            if time.time() - self.last_ping_time >= PING_INTERVAL_S:
+                self.send_cmd("PING")
+                self.last_ping_time = time.time()
+            time.sleep(0.5)
+
+    def cam_dist_poll_loop(self):
+        while self.running and self.serial and self.serial.is_open:
+            self.send_cmd("GET_CAM_DIST")
+            time.sleep(CAM_DIST_POLL_INTERVAL_S)
+
     def serial_reader_thread(self):
+        print("Serial reader started.")
         try:
-            while self.running:
-                try:  # Inner try for serial read
-                    if self.serial and self.serial.in_waiting > 0:
-                        line = self.serial.readline().decode('utf-8', errors='ignore').strip()
-                        if line:
-                            print(f"ARDUINO: {line}")
+            while self.serial and self.serial.is_open and self.running:
+                try:
+                    while self.serial.in_waiting > 0:
+                        line = self.serial.readline().decode(errors='ignore').strip()
+                        if not line:
+                            continue
+                        print(f"ARDUINO: {line}")
 
-                            # === START US1: Copra detected at entrance ===
-                            if line.startswith("ACK,ENQUEUE_PLACEHOLDER"):
-                                parts = line.split(",")
-                                idx = "??"
+                        # === START US1: Copra detected at entrance ===
+                        if line.startswith("ACK,ENQUEUE_PLACEHOLDER"):
+                            parts = line.split(",")
+                            idx = "??"
+                            cid = "??"
+                            for p in parts:
+                                if "idx=" in p:
+                                    idx = p.split("=")[1]
+                                if "id=" in p:
+                                    cid = p.split("=")[1]
+                            display_id = str(int(cid) + 1).zfill(4)
+                            self._log_message(f"Copra detected at Start (US1) → #{display_id} queued (slot {idx})")
+
+                        # === COPRA ARRIVED AT CAMERA ===
+                        elif line.startswith("ACK,AT_CAM"):
+                            parts = line.split(",")
+                            id = None
+                            for part in parts:
+                                if 'id=' in part:
+                                    id = int(part.split('=')[1])
+                                    break
+                            if id is not None:
+                                display_id = str(id + 1).zfill(4)
+                                self._log_message(f"Copra #{display_id} at Camera → Classifying...")
+                            self.perform_classification(id)
+
+                        # === CLASSIFICATION RECEIVED BY ARDUINO ===
+                        elif line.startswith("ACK,CLASS_RECEIVED,id="):
+                            cid = line.split("=")[-1]
+                            self._log_message(f"Classification received for Copra #{cid}")
+
+                        # === STANDARD CLEAR ===
+                        elif line == "ACK,CLEAR_STANDARD":
+                            display_id = str(int(self.last_sorted_id) + 1).zfill(4)
+                            self._log_message(f"Moving Copra #{display_id} → Standard (conveyor forward)")
+
+                        # === SORTING ACTIONS ===
+                        elif line.startswith("ACK,SORT,L"):
+                            parts = line.split(",")
+                            cid = "??"
+                            for p in parts:
+                                if "id=" in p:
+                                    cid = p.split("=")[1]
+                                    break
+                            if cid == "-1":
+                                continue
+                            self.last_sorted_id = cid
+                            display_id = str(int(cid) + 1).zfill(4)
+                            self._log_message(f"Sorting Copra #{display_id} → Overcooked (left servo)")
+                        elif line.startswith("ACK,SORT,R"):
+                            parts = line.split(",")
+                            cid = "??"
+                            for p in parts:
+                                if "id=" in p:
+                                    cid = p.split("=")[1]
+                                    break
+                            if cid == "-1":
+                                continue
+                            self.last_sorted_id = cid
+                            display_id = str(int(cid) + 1).zfill(4)
+                            self._log_message(f"Sorting Copra #{display_id} → Raw (right servo)")
+
+                        # === CLASS ECHO FROM ARDUINO ===
+                        elif line.startswith("ACK,CLASS,"):
+                            parts = line.split(',')
+                            if len(parts) >= 3:
+                                cls = parts[2]
+                                remaining = ','.join(parts[3:])
                                 cid = "??"
-                                for p in parts:
-                                    if "idx=" in p:
-                                        idx = p.split("=")[1]
-                                    if "id=" in p:
-                                        cid = p.split("=")[1]
-                                display_id = str(int(cid) + 1).zfill(4)
-                                self._log_message(f"Copra detected at Start (US1) → #{display_id} queued (slot {idx})")
+                                extra = ""
+                                if 'id=' in remaining:
+                                    id_part = remaining.split('id=')[1]
+                                    cid = id_part.split()[0]  # Take until space for extras like "(default ...)"
+                                    extra = remaining.replace(f",id={cid}", "")
+                                elif ' (' in remaining:  # For extras like "(default failsafe)"
+                                    extra = remaining
+                                else:
+                                    cid = None
+                                cls = cls.strip().upper().replace('-COPRA', '')  # Clean for consistency
+                                log_msg = f"Arduino echoed class: {cls}"
+                                if cid != "??":
+                                    log_msg += f",id={cid}"
+                                if extra:
+                                    log_msg += f" {extra}"
+                                self._log_message(log_msg)
+                                if cid != "??" and self.last_sent_id == cid and self.last_sent_class:
+                                    if self.last_sent_class.lower() not in cls.lower():
+                                        self._log_message(f"Warning: Sent class {self.last_sent_class} for ID {cid} not matched in echo.")
 
-                            # === COPRA ARRIVED AT CAMERA ===
-                            elif line.startswith("ACK,AT_CAM"):
-                                parts = line.split(",")
-                                id = None
-                                for part in parts:
-                                    if 'id=' in part:
-                                        id = int(part.split('=')[1])
-                                        break
-                                if id is not None:
-                                    display_id = str(id + 1).zfill(4)
-                                    self._log_message(f"Copra #{display_id} at Camera → Classifying...")
-                                self.perform_classification(id)
+                        # === EXISTING MESSAGES ===
+                        elif line == "ERR,MOTOR_TIMEOUT":
+                            self._log_message("Error: Camera sensor missed object. Check alignment/distance.")
+                        elif line.startswith("ERR,FIFO_FULL"):
+                            self._log_message("Error: Arduino queue full. System halted.")
+                            self._reset_stats()
+                        elif line == "ACK,PING":
+                            print("Arduino PING OK")
+                        elif line.startswith("ACK,CAM_DIST,"):
+                            dist = line.split(",")[-1]
+                            self._log_message(f"Camera US distance: {dist}cm", console_only=True)
+                        elif line == "ERR,CAM_SENSOR_FAIL":
+                            self._log_message("CRITICAL: Camera ultrasonic sensor failed! Check wiring/hardware.")
+                        elif line == "ACK,HEARTBEAT":
+                            print("Arduino heartbeat OK")
+                        elif line == "ERR,MISSED_CAM":
+                            self._log_message("Missed camera detection – check sensor/copra alignment")
+                        elif line == "ERR,SYSTEM_PAUSED":
+                            self._log_message("CRITICAL: Arduino system paused due to errors. Reset required.")
+                            self.stop_process()
 
-                            # === CLASSIFICATION RECEIVED BY ARDUINO ===
-                            elif line.startswith("ACK,CLASS_RECEIVED,id="):
-                                cid = line.split("=")[-1]
-                                self._log_message(f"Classification received for Copra #{cid}")
-
-                            # === STANDARD CLEAR ===
-                            elif line == "ACK,CLEAR_STANDARD":
-                                display_id = str(int(self.last_sorted_id) + 1).zfill(4)
-                                self._log_message(f"Moving Copra #{display_id} → Standard (conveyor forward)")
-
-                            # === SORTING ACTIONS ===
-                            elif line.startswith("ACK,SORT,L"):
-                                parts = line.split(",")
-                                cid = "??"
-                                for p in parts:
-                                    if "id=" in p:
-                                        cid = p.split("=")[1]
-                                        break
-                                if cid == "-1":
-                                    continue
-                                self.last_sorted_id = cid
-                                display_id = str(int(cid) + 1).zfill(4)
-                                self._log_message(f"Sorting Copra #{display_id} → Overcooked (left servo)")
-                            elif line.startswith("ACK,SORT,R"):
-                                parts = line.split(",")
-                                cid = "??"
-                                for p in parts:
-                                    if "id=" in p:
-                                        cid = p.split("=")[1]
-                                        break
-                                if cid == "-1":
-                                    continue
-                                self.last_sorted_id = cid
-                                display_id = str(int(cid) + 1).zfill(4)
-                                self._log_message(f"Sorting Copra #{display_id} → Raw (right servo)")
-
-                            # === CLASS ECHO FROM ARDUINO ===
-                            elif line.startswith("ACK,CLASS,"):
-                                parts = line.split(',')
-                                if len(parts) >= 3:
-                                    cls = parts[2]
-                                    remaining = ','.join(parts[3:])
-                                    cid = "??"
-                                    extra = ""
-                                    if 'id=' in remaining:
-                                        id_part = remaining.split('id=')[1]
-                                        cid = id_part.split()[0]  # Take until space for extras like "(default ...)"
-                                        extra = remaining.replace(f",id={cid}", "")
-                                    elif ' (' in remaining:  # For extras like "(default failsafe)"
-                                        extra = remaining
-                                    else:
-                                        cid = None
-                                    cls = cls.strip().upper().replace('-COPRA', '')  # Clean for consistency
-                                    log_msg = f"Arduino echoed class: {cls}"
-                                    if cid != "??":
-                                        log_msg += f",id={cid}"
-                                    if extra:
-                                        log_msg += f" {extra}"
-                                    self._log_message(log_msg)
-                                    if cid != "??" and self.last_sent_id == cid and self.last_sent_class:
-                                        if self.last_sent_class.lower() not in cls.lower():
-                                            self._log_message(f"Warning: Sent class {self.last_sent_class} for ID {cid} not matched in echo.")
-
-                            # === EXISTING MESSAGES ===
-                            elif line == "ERR,MOTOR_TIMEOUT":
-                                self._log_message("Error: Camera sensor missed object. Check alignment/distance.")
-                            elif line.startswith("ERR,FIFO_FULL"):
-                                self._log_message("Error: Arduino queue full. System halted.")
-                                self._reset_stats()
-                            elif line == "ACK,PING":
-                                print("Arduino PING OK")
-                            elif line.startswith("ACK,CAM_DIST,"):
-                                dist = line.split(",")[-1]
-                                self._log_message(f"Camera US distance: {dist}cm", console_only=True)
-                            elif line == "ERR,CAM_SENSOR_FAIL":
-                                self._log_message("CRITICAL: Camera ultrasonic sensor failed! Check wiring/hardware.")
-                            elif line == "ACK,HEARTBEAT":
-                                print("Arduino heartbeat OK")
-                            elif line == "ERR,MISSED_CAM":
-                                self._log_message("Missed camera detection – check sensor/copra alignment")
-                            elif line == "ERR,SYSTEM_PAUSED":
-                                self._log_message("CRITICAL: Arduino system paused due to errors. Reset required.")
-                                self.stop_process()
-
-                        time.sleep(0.01)
+                    time.sleep(0.01)
                 except Exception as e:
                     if not self.serial_error_logged:
                         self._log_message(f"Serial reader error: {e}")

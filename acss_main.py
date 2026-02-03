@@ -54,6 +54,7 @@ Changes:
 # Update on February 03, 2026: Added joystick support with polling thread. Mapped d-pad left/X button to RAW, up/Y to STANDARD, right/B to OVERCOOKED. On manual key/joystick press, stop process, send class, wait 5s, resume process. Reassigned 'a' to toggle start/stop.
 # Update on February 03, 2026: Reassigned joystick buttons: 3 for RAW, 4 for STANDARD, 1 for OVERCOOKED, 0 for toggle start/stop. D-pad arrows unchanged. Removed joystick detection log.
 # Update on February 03, 2026: Updated joystick/keyboard to stop conveyor briefly on class sends (via AUTO_DISABLE, send, wait, AUTO_ENABLE). For arrows, stop, simulate/log mock camera classification, resume. Button 0 toggles full process/conveyor.
+# Update on February 03, 2026: Added joystick buttons 6 (L pad) for TEST_SERVO_L, 7 (R pad) for TEST_SERVO_R to test servo responsiveness.
 """
 
 import tkinter as tk
@@ -222,7 +223,7 @@ class ACSSGui:
         self.root.bind('<Left>', lambda e: self.simulate_camera('RAW'))    # Left for RAW (simulate cam/log)
         self.root.bind('<x>', lambda e: self.send_manual('RAW', log_msg="Flapper zone: Manual RAW"))    # X for RAW (flapper)
         self.root.bind('<Up>', lambda e: self.simulate_camera('STANDARD')) # Up for STANDARD (simulate cam)
-        self.root.bind('<4>', lambda e: self.send_manual('STANDARD', log_msg="Flapper zone: Manual STANDARD")) # 4 for STANDARD (flapper)
+        self.root.bind('<y>', lambda e: self.send_manual('STANDARD', log_msg="Flapper zone: Manual STANDARD")) # Y for STANDARD (flapper)
         self.root.bind('<Right>', lambda e: self.simulate_camera('OVERCOOKED')) # Right for OVERCOOKED (simulate cam)
         self.root.bind('<b>', lambda e: self.send_manual('OVERCOOKED', log_msg="Flapper zone: Manual OVERCOOKED")) # B for OVERCOOKED (flapper)
 
@@ -249,6 +250,12 @@ class ACSSGui:
                         self.send_manual('OVERCOOKED', log_msg="Joystick 1 (flapper): Manual OVERCOOKED")
                     elif event.button == 0:  # 0 for toggle start/stop
                         self._toggle_process()
+                    elif event.button == 6:  # 6 for TEST_SERVO_L (L pad)
+                        self.send_cmd('TEST_SERVO_L')
+                        self._log_message("Testing left servo...")
+                    elif event.button == 7:  # 7 for TEST_SERVO_R (R pad)
+                        self.send_cmd('TEST_SERVO_R')
+                        self._log_message("Testing right servo...")
                 elif event.type == pygame.JOYHATMOTION:
                     if event.hat == 0:  # D-pad
                         hat_x, hat_y = event.value

@@ -260,6 +260,9 @@ class ACSSGui:
             for event in pygame.event.get():
                 if event.type == pygame.JOYBUTTONDOWN:
                     now = time.time() * 1000  # ms
+                    if now - self.last_button_press_time < self.button_debounce_ms:
+                        continue  # Debounce
+                    self.last_button_press_time = now
                     if event.button == 6:  # 6 for OVERCOOKED
                         self.simulate_flapper('OVERCOOKED')
                     elif event.button == 4:  # 4 for STANDARD
@@ -275,6 +278,10 @@ class ACSSGui:
                     elif event.button == 1:  # Optional: Keep or remap if needed
                         pass
                 elif event.type == pygame.JOYHATMOTION:
+                    now = time.time() * 1000
+                    if now - self.last_button_press_time < self.button_debounce_ms:
+                        continue  # Debounce
+                    self.last_button_press_time = now
                     if event.hat == 0:  # D-pad
                         hat_x, hat_y = event.value
                         if hat_x == -1:  # Left (RAW)
@@ -305,17 +312,22 @@ class ACSSGui:
         else:
             return  # Invalid
 
-        self._log_message(f"Class: {class_str}")
-        self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
+        self._log_message(f"Manual: Sending {class_str}")
+
+        # Pause auto process to avoid interference
+        self.send_cmd("AUTO_DISABLE")
+        time.sleep(0.2)  # Wait for disable
 
         # Sequence to trigger servo: TRIGGER_START to start flow, set class, TRIGGER_FLAP to sort
-        self.send_cmd("TRIGGER_START")
-        time.sleep(0.05)
-        self.send_cmd(class_str)
-        time.sleep(0.05)
-        success = self.send_cmd("TRIGGER_FLAP")
+        success_start = self.send_cmd("TRIGGER_START")
+        time.sleep(0.2)  # Increased delay
+        success_class = self.send_cmd(class_str)
+        time.sleep(0.2)  # Increased delay
+        success_flap = self.send_cmd("TRIGGER_FLAP")
 
-        if success:
+        if success_start and success_class and success_flap:
+            self._log_message(f"Class: {class_str}")
+            self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
             self._log_message("Classification sorted")
             self.copra_counter += 1
             self.stats[category] += 1
@@ -323,8 +335,11 @@ class ACSSGui:
             self.moisture_sums[category] += moisture
             self.root.after(0, self.update_stats)
         else:
-            self._log_message("Send failed → Defaulting to OVERCOOKED")
-            self.send_cmd("OVERCOOKED")
+            self._log_message(f"Manual send failed (start: {success_start}, class: {success_class}, flap: {success_flap}) - No override sent")
+
+        # Resume auto after short wait
+        time.sleep(2.0)  # Allow time for manual action to complete
+        self.send_cmd("AUTO_ENABLE")
 
     def _on_tab_changed(self, event):
         notebook = event.widget
@@ -506,7 +521,6 @@ class ACSSGui:
         exit_btn = tk.Button(frm, text="Exit", font=("Arial", 12), bg="red", fg="white", command=self.root.quit)
         exit_btn.pack(pady=10)
         cancel_btn = tk.Button(frm, text="Cancel", font=("Arial", 12), command=lambda: self.root.quit())  # Placeholder
-        cancel_btn.pack(pady=10)
 
     def open_serial(self):
         if SERIAL_AVAILABLE:

@@ -60,7 +60,7 @@ Changes:
 # Update on February 03, 2026: Muted "Process started" and "Process stopped" logs to prevent repetition.
 # Update on February 03, 2026: Adjusted moisture reading from 5s to 1s. Made buttons 3/4/1 run YOLO on press like arrows (same behavior, different zones). Removed stop/resume in manual/simulate since continuous motor (stopping won't do anything). Added debounce (1s) for arrow presses to avoid double reads. Added wait/retry in simulate_camera until object detected. Added total time (HH:MM:SS) in statistics, auto-calculated.
 # Update on February 03, 2026: Shifted manual control to flapper zone only (ignore cam/YOLO). Buttons/arrows now assign fixed class (left/L/3: RAW, right/R/1: OVERCOOKED, up/Y/4: STANDARD), generate random moisture in class range, log class then 1s-delayed moisture, update stats, send class to Arduino (no YOLO, no object wait).
-# Update on February 04, 2026: Simplified mappings to 6 (RAW), 7 (OVERCOOKED), 4 (STANDARD), 0 (start/stop). Removed d-pad and keyboard classification bindings to avoid confusion. Reverted to simple class send for responsiveness. Printed moisture without delay.
+# Update on February 04, 2026: Remapped joystick buttons to use test commands for servo movement: 6 for TEST_SERVO_L, 7 for TEST_SERVO_R, 4 for STANDARD classification, 0 for start/stop toggle. Added cooldown for servo tests.
 """
 
 import tkinter as tk
@@ -184,6 +184,10 @@ class ACSSGui:
         # Manual control counter (for dummy IDs in manual sends)
         self.manual_id_counter = 0
 
+        # Cooldown for servo tests (2s to prevent spam)
+        self.last_servo_test_time = {6: 0, 7: 0}
+        self.servo_cooldown_ms = 2000
+
         # Debounce for button presses
         self.last_button_press_time = 0
         self.button_debounce_ms = 1000  # 1s interval to avoid double reads
@@ -219,7 +223,7 @@ class ACSSGui:
         self.min_max_btn.place(relx=0.95, rely=0.95, anchor='se')
         self.min_max_btn.place_forget()
 
-        # Add keyboard bindings for system control (no classification bindings to avoid confusion)
+        # Add keyboard bindings for manual control
         self.root.bind('<a>', lambda e: self._toggle_process())  # Toggle start/stop
         self.root.bind('<p>', lambda e: self.send_cmd('PING'))           # Ping Arduino
         self.root.bind('<e>', lambda e: self.send_cmd('EMERGENCY_STOP')) # Emergency stop
@@ -228,6 +232,14 @@ class ACSSGui:
         self.root.bind('<y>', lambda e: self.send_cmd('TEST_SERVO_R'))   # Test right servo
         self.root.bind('<g>', lambda e: self.send_cmd('GET_CAM_DIST'))   # Get camera distance
         self.root.bind('<h>', lambda e: self.send_cmd('GET_DEFAULT'))    # Get default class
+
+        # Joystick-style keys for manual classifications
+        self.root.bind('<Left>', lambda e: self.simulate_flapper('RAW'))      # Left for RAW
+        self.root.bind('<x>', lambda e: self.simulate_flapper('RAW'))         # X similar to left
+        self.root.bind('<Up>', lambda e: self.simulate_flapper('STANDARD'))   # Up for STANDARD
+        self.root.bind('<y>', lambda e: self.simulate_flapper('STANDARD'))    # Y similar to up
+        self.root.bind('<Right>', lambda e: self.simulate_flapper('OVERCOOKED')) # Right for OVERCOOKED
+        self.root.bind('<b>', lambda e: self.simulate_flapper('OVERCOOKED'))  # B similar to right
 
         # Initialize pygame for joystick
         pygame.init()
@@ -248,18 +260,36 @@ class ACSSGui:
                     if now - self.last_button_press_time < self.button_debounce_ms:
                         continue  # Debounce
                     self.last_button_press_time = now
-                    if event.button == 6:  # 6 for RAW
-                        self.simulate_flapper('RAW')
-                    elif event.button == 7:  # 7 for OVERCOOKED
-                        self.simulate_flapper('OVERCOOKED')
+                    if event.button == 6:  # 6 for TEST_SERVO_L
+                        if now - self.last_servo_test_time[6] >= self.servo_cooldown_ms:
+                            self.send_cmd('TEST_SERVO_L')
+                            self.last_servo_test_time[6] = now
+                    elif event.button == 7:  # 7 for TEST_SERVO_R
+                        if now - self.last_servo_test_time[7] >= self.servo_cooldown_ms:
+                            self.send_cmd('TEST_SERVO_R')
+                            self.last_servo_test_time[7] = now
                     elif event.button == 4:  # 4 for STANDARD
                         self.simulate_flapper('STANDARD')
                     elif event.button == 0:  # 0 for toggle start/stop
                         self._toggle_process()
+                elif event.type == pygame.JOYHATMOTION:
+                    if event.hat == 0:  # D-pad
+                        hat_x, hat_y = event.value
+                        if hat_x == -1:  # Left (RAW)
+                            self.simulate_flapper('RAW')
+                        elif hat_x == 1:  # Right (OVERCOOKED)
+                            self.simulate_flapper('OVERCOOKED')
+                        elif hat_y == 1:  # Up (STANDARD)
+                            self.simulate_flapper('STANDARD')
             time.sleep(0.05)  # Poll rate
 
     def simulate_flapper(self, fixed_class):
-        """At flapper: Assign fixed class per button, random moisture in range, log class/moisture, update stats, send class to Arduino."""
+        """At flapper: Assign fixed class per button, random moisture in class range, log class/delayed moisture, update stats, send class to Arduino."""
+        now = time.time() * 1000
+        if now - self.last_button_press_time < self.button_debounce_ms:
+            return  # Debounce
+        self.last_button_press_time = now
+
         class_str = fixed_class.upper()
         category = f"{class_str.lower()}-copra"
 
@@ -274,7 +304,7 @@ class ACSSGui:
             return  # Invalid
 
         self._log_message(f"Class: {class_str}")
-        self._log_message(f"Moisture: {moisture:.2f}%")
+        self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
 
         success = self.send_cmd(class_str)
         if success:
@@ -285,7 +315,8 @@ class ACSSGui:
             self.moisture_sums[category] += moisture
             self.root.after(0, self.update_stats)
         else:
-            self._log_message("Send failed")
+            self._log_message("Send failed → Defaulting to OVERCOOKED")
+            self.send_cmd("OVERCOOKED")
 
     def _on_tab_changed(self, event):
         notebook = event.widget
@@ -610,7 +641,7 @@ class ACSSGui:
                 self.copra_counter += 1
                 cat_name = category.split('-')[0].capitalize()
                 self._log_message(f"Class: {cat_name.upper()}")
-                self._log_message(f"Moisture: {moisture:.2f}%")
+                self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
                 self.stats[category] += 1
                 self.stats['total'] += 1
                 self.moisture_sums[category] += moisture

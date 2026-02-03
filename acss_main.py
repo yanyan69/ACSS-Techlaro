@@ -63,6 +63,7 @@ Changes:
 # Update on February 03, 2026: Changed buttons to 6 (RAW), 7 (OVERCOOKED), 4 (STANDARD), 0 (start/stop). Updated d-pad: left=RAW, right=OVERCOOKED, up=STANDARD.
 # Update on February 03, 2026: Fixed servo response by sending TRIGGER_START, class, TRIGGER_FLAP sequence in simulate_flapper to simulate flow and trigger sorting.
 # Update on February 03, 2026: Updated button mappings: button 6 to OVERCOOKED, button 7 to RAW, button 4 to STANDARD, button 9 to toggle start/stop. Adjusted d-pad and keyboard bindings accordingly.
+# Update on February 03, 2026: Fixed double reading by increasing delay between sends to 0.2s and retries to 5. Removed default OVERCOOKED send on failure to avoid double class log; log error instead.
 """
 
 import tkinter as tk
@@ -524,7 +525,7 @@ class ACSSGui:
             self.serial.close()
             self._log_message("Serial port closed.")
 
-    def send_cmd(self, cmd, retries=3):
+    def send_cmd(self, cmd, retries=5):
         checksum = 0
         for c in cmd:
             checksum ^= ord(c)

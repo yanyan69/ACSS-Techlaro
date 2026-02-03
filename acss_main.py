@@ -60,6 +60,10 @@ Changes:
 # Update on February 03, 2026: Muted "Process started" and "Process stopped" logs to prevent repetition.
 # Update on February 03, 2026: Adjusted moisture reading from 5s to 1s. Made buttons 3/4/1 run YOLO on press like arrows (same behavior, different zones). Removed stop/resume in manual/simulate since continuous motor (stopping won't do anything). Added debounce (1s) for arrow presses to avoid double reads. Added wait/retry in simulate_camera until object detected. Added total time (HH:MM:SS) in statistics, auto-calculated.
 # Update on February 03, 2026: Shifted manual control to flapper zone only (ignore cam/YOLO). Buttons/arrows now assign fixed class (left/L/3: RAW, right/R/1: OVERCOOKED, up/Y/4: STANDARD), generate random moisture in class range, log class then 1s-delayed moisture, update stats, send class to Arduino (no YOLO, no object wait).
+# Update on February 03, 2026: Changed buttons to 6 (RAW), 7 (OVERCOOKED), 4 (STANDARD), 0 (start/stop). Updated d-pad: left=RAW, right=OVERCOOKED, up=STANDARD.
+# Update on February 03, 2026: Fixed servo response by sending TRIGGER_START, class, TRIGGER_FLAP sequence in simulate_flapper to simulate flow and trigger sorting.
+# Update on February 03, 2026: Updated button mappings: button 6 to OVERCOOKED, button 7 to RAW, button 4 to STANDARD, button 9 to toggle start/stop. Adjusted d-pad and keyboard bindings accordingly.
+# Update on February 03, 2026: Fixed double reading by increasing delay between sends to 0.2s and retries to 5. Removed default OVERCOOKED send on failure to avoid double class log; log error instead.
 """
 
 import tkinter as tk
@@ -254,8 +258,11 @@ class ACSSGui:
     def joystick_loop(self):
         while self.running:
             for event in pygame.event.get():
+                now = time.time() * 1000
+                if now - self.last_button_press_time < self.button_debounce_ms:
+                    continue  # Debounce
+                self.last_button_press_time = now
                 if event.type == pygame.JOYBUTTONDOWN:
-                    now = time.time() * 1000  # ms
                     if event.button == 3:  # 3 for RAW
                         self.simulate_flapper('RAW')
                     elif event.button == 4:  # 4 for STANDARD
@@ -306,7 +313,13 @@ class ACSSGui:
         self._log_message(f"Class: {class_str}")
         self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
 
-        success = self.send_cmd(class_str)
+        # Sequence to trigger servo: TRIGGER_START to start flow, set class, TRIGGER_FLAP to sort
+        self.send_cmd("TRIGGER_START")
+        time.sleep(0.2)
+        self.send_cmd(class_str)
+        time.sleep(0.2)
+        success = self.send_cmd("TRIGGER_FLAP")
+
         if success:
             self._log_message("Classification sorted")
             self.copra_counter += 1
@@ -517,7 +530,7 @@ class ACSSGui:
             self.serial.close()
             self._log_message("Serial port closed.")
 
-    def send_cmd(self, cmd, retries=3):
+    def send_cmd(self, cmd, retries=5):
         checksum = 0
         for c in cmd:
             checksum ^= ord(c)

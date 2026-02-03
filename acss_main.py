@@ -55,6 +55,7 @@ Changes:
 # Update on February 03, 2026: Reassigned joystick buttons: 3 for RAW, 4 for STANDARD, 1 for OVERCOOKED, 0 for toggle start/stop. D-pad arrows unchanged. Removed joystick detection log.
 # Update on February 03, 2026: Updated joystick/keyboard to stop conveyor briefly on class sends (via AUTO_DISABLE, send, wait, AUTO_ENABLE). For arrows, stop, simulate/log mock camera classification, resume. Button 0 toggles full process/conveyor.
 # Update on February 03, 2026: Added joystick buttons 6 (L pad) for TEST_SERVO_L, 7 (R pad) for TEST_SERVO_R to test servo responsiveness.
+# Update on February 03, 2026: Added 2s cooldown for servo test buttons (6/7) to prevent spamming and protect hardware.
 """
 
 import tkinter as tk
@@ -178,6 +179,10 @@ class ACSSGui:
         # Manual control counter (for dummy IDs in manual sends)
         self.manual_id_counter = 0
 
+        # Cooldown for servo tests (2s to prevent spam)
+        self.last_servo_test_time = {6: 0, 7: 0}
+        self.servo_cooldown_ms = 2000
+
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
             try:
@@ -242,6 +247,7 @@ class ACSSGui:
         while self.running:
             for event in pygame.event.get():
                 if event.type == pygame.JOYBUTTONDOWN:
+                    now = time.time() * 1000  # ms
                     if event.button == 3:  # 3 for RAW (flapper)
                         self.send_manual('RAW', log_msg="Joystick 3 (flapper): Manual RAW")
                     elif event.button == 4:  # 4 for STANDARD (flapper)
@@ -251,11 +257,19 @@ class ACSSGui:
                     elif event.button == 0:  # 0 for toggle start/stop
                         self._toggle_process()
                     elif event.button == 6:  # 6 for TEST_SERVO_L (L pad)
-                        self.send_cmd('TEST_SERVO_L')
-                        self._log_message("Testing left servo...")
+                        if now - self.last_servo_test_time[6] >= self.servo_cooldown_ms:
+                            self.send_cmd('TEST_SERVO_L')
+                            self._log_message("Testing left servo...")
+                            self.last_servo_test_time[6] = now
+                        else:
+                            self._log_message("Servo test cooldown - wait a bit to avoid spam.")
                     elif event.button == 7:  # 7 for TEST_SERVO_R (R pad)
-                        self.send_cmd('TEST_SERVO_R')
-                        self._log_message("Testing right servo...")
+                        if now - self.last_servo_test_time[7] >= self.servo_cooldown_ms:
+                            self.send_cmd('TEST_SERVO_R')
+                            self._log_message("Testing right servo...")
+                            self.last_servo_test_time[7] = now
+                        else:
+                            self._log_message("Servo test cooldown - wait a bit to avoid spam.")
                 elif event.type == pygame.JOYHATMOTION:
                     if event.hat == 0:  # D-pad
                         hat_x, hat_y = event.value

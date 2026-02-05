@@ -3,64 +3,21 @@
 Automated Copra Segregation System (ACSS) GUI
 - Provides a user interface for controlling and monitoring the copra segregation process.
 - Integrates with Arduino via serial for automated detection and sorting using ultrasonic sensors and servos.
-- Uses YOLO for copra classification (Raw, Standard, Overcooked) based on camera frames triggered by Arduino.
+- Uses YOLO for copra classification (Raw, Standard, Overcooked) based on camera frames.
 - Displays real-time camera preview with live bounding boxes at ~3 FPS for debugging, logs (classification results, system events), and statistics.
-- Classification only triggered by Arduino's ACK,AT_CAM (ultrasonic detection), but preview shows bounding boxes continuously.
+- Classification triggered when new tracked object detected via YOLO track (no cam US needed).
+- Sends class to Arduino on detection, which enqueues and starts/continues conveyor if needed.
+- Flap US on Arduino handles stopping for sorting.
 
 Changes:
-- Set YOLO_FRAME_SKIP = 5 to target ~3 FPS for bounding box updates (assuming ~15 FPS camera).
-- Adjusted camera_loop sleep to stabilize frame rate.
-- Updated perform_classification to use yolo.track for consistency with live preview, fixing cls mismatch.
-- Added cls logging in perform_classification to debug classification vs. preview discrepancies.
-- Reduced conf to 0.25 in perform_classification to increase detection chance.
-- Added logging for send_cmd success/failure in perform_classification.
-- Increased CLASSIFICATION_TIMEOUT_S to 2.5s for more time.
-- Reduced max_det to 1 in perform_classification for faster processing.
-- Added time logging in perform_classification to debug if it exceeds Arduino's CLASS_WAIT_MS = 3000ms.
-- Improved serial_reader_thread to read all available lines when data is ready, fixing missed lines.
-- Set serial timeout to 1s for better reading.
-- Updated category_map to match model classes: {0: 'Overcooked', 1: 'Raw', 2: 'Standard'}
-- Failsafe remains OVERCOOKED.
-
-# Update on November 05, 2025: Fixed mismatched moisture calculation to align with category_map (Overcooked low, Raw high, Standard mid). Removed cls=2 force in else.
-# Update on November 05, 2025: Added ID parsing from ACK,AT_CAM and sending CLASS,ID to sync with Arduino FIFO queue.
-# Update on November 05, 2025: Replaced strupr with command.upper() to fix runtime error.
-# Update on November 05, 2025: Removed unused self.class_to_sort and related comment (dead code cleanup).
-# Update on November 05, 2025: Updated category_map to match user's model: {0: 'overcooked-copra', 1: 'raw-copra', 2: 'standard-copra'}.
-# Update on November 05, 2025: Increased CLASSIFICATION_TIMEOUT_S to 2.8s (close to Arduino's 3s). Added conf/cls logging in no-candidates case. Increased YOLO_FRAME_SKIP to 10 for lower load if needed (test/adjust).
-# Update on November 05, 2025: Made bounding box update frequency adjustable via YOLO_FRAME_SKIP constant. Persisted last detection results to draw boxes consistently on every frame, avoiding flickering. Boxes now update only every SKIP frames but remain displayed until new detection.
-# Update on November 05, 2025: Added Clear Log button below log frame in home tab. Adjusted perform_classification to loop retries until close to 3s timeout, maximizing YOLO stabilization time before defaulting to OVERCOOKED.
-# Update on November 05, 2025: Updated perform_classification to run YOLO multiple times over ~2.8s, collect candidates, and send the most frequent class (averaged detection) at the end for stabilization. Added retry on send_cmd if failed. Stripped '-copra' from log category for cleaner output (e.g., "Raw Copra #0003").
-# Update on November 05, 2025: Stripped '-copra' from sent class_str to match Arduino's strToClass (e.g., "OVERCOOKED" instead of "OVERCOOKED-COPRA"). Commented out flapper log as unnecessary.
-# Update on November 05, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.8s and sleep to 0.1s to send classification faster, avoiding Arduino 3s timeout race. Added early exit if clear majority in candidates. Increased conf to 0.3 for fewer false positives.
-# Update on November 07, 2025: Addressed gaps in classifications and cam US. Added XOR checksum to send_cmd. Reduced CLASSIFICATION_TIMEOUT_S to 1.5s and sleep to 0.05s with early exit after 2 runs on majority. Handled ACK,CLASS_RECEIVED,id=... for sync. Added periodic GET_CAM_DIST polling every 10s for logs. Handled ERR,CAM_SENSOR_FAIL with alert. Logged ACK,HEARTBEAT as confirm.
-# Update on November 07, 2025: Added full process flow logging with Copra #ID tracking.
-# - Logs Start US1 detection + queue entry
-# - Logs arrival at camera, classification, delayed moisture, and sorting
-# - Moisture logged 1 second after conveyor starts (ACK,MOTOR,START)
-# - All messages include Copra #ID for perfect queue tracking
-# Update on November 07, 2025: REMOVED ALL POP-UP ERROR WINDOWS. All errors now go to Log only.
-# Update on November 07, 2025: Reduced CLASSIFICATION_TIMEOUT_S to 1.0s and sleep to 0.02s for faster send. Added handling for ERR,MISSED_CAM in log. Tied moisture delay to ACK,CLASS_RECEIVED. Synced default fallback with Arduino (query on start). 
-# Update on November 08, 2025: Increased CLASSIFICATION_TIMEOUT_S to 4.0s and sleep to 0.05s for better sync. Added 3x retry in send_cmd. Added MOISTURE_LOG_DELAY_MS constant. Removed extra text from moisture log. Lowered conf to 0.5 in perform_classification. Updated serial parsing for id= in ACK,MOTOR,START and ACK,SORT,L/R. Added handling for ERR,SYSTEM_PAUSED. Added no-candidates warning in perform_classification.
-# Update on November 08, 2025: Moved start detection log to ACK,ENQUEUE_PLACEHOLDER for correct idx/id parsing. Ignore ACK,MOTOR,START if id=-1 (ghost). Added warning if sent class not matched in ACK,CLASS_RECEIVED.
-# Update on November 08, 2025: Fixed class echo parsing in serial_reader_thread to correctly extract class and ID from "ACK,CLASS,...". Moved mismatch warning to this block for accurate checking. Cleaned class string for consistency.
-# Update on November 08, 2025: Fixed inconsistent logs: Relocated "moving to standard" to ACK,CLEAR_STANDARD. Removed moisture scheduling from ACK,CLASS_RECEIVED (keep on ACK,MOTOR,START). Use per-ID moisture dict to avoid stale values. Schedule on CLEAR_STANDARD for STANDARD sorts.
-# Update on November 08, 2025: Added Copy Log button beside Clear Log button (copies log from console).
-# Update on November 08, 2025: Moved moisture logging to immediately after classification in perform_classification (no delay, prints right after "Class: ..."). Removed delayed logging and related vars/scheduling. Rounded moisture to 2 decimals based on research (raw: 7.1-60%, standard: 6-7%, overcooked: 4-5.9%).
-# Update on November 08, 2025: Adjusted copra # display to start from 1 (offset Arduino ID by +1 in logs). Added constant MOISTURE_PRINT_DELAY_MS = 2000 (2s delay after class log for moisture print). Scheduled moisture log with root.after for safe, non-disruptive delay.
-# Update on November 08, 2025: Added iou=0.45 to YOLO track calls in perform_classification and camera_loop to reduce overlapping bounding boxes via stricter NMS.
-# Update on November 08, 2025: Enforced minimum 1s stabilization in perform_classification before sending command by looping inferences until at least 1s elapsed or consensus reached.
-# Update on February 03, 2026: Added keyboard bindings for manual control: 'a' for OVERCOOKED (left servo), 's' for STANDARD (conveyor clear), 'd' for RAW (right servo). Added more keys for full manual prototype control.
-# Update on February 03, 2026: Added joystick support with polling thread. Mapped d-pad left/X button to RAW, up/Y to STANDARD, right/B to OVERCOOKED. On manual key/joystick press, stop process, send class, wait 5s, resume process. Reassigned 'a' to toggle start/stop.
-# Update on February 03, 2026: Reassigned joystick buttons: 3 for RAW, 4 for STANDARD, 1 for OVERCOOKED, 0 for toggle start/stop. D-pad arrows unchanged. Removed joystick detection log.
-# Update on February 03, 2026: Updated joystick/keyboard to stop conveyor briefly on class sends (via AUTO_DISABLE, send, wait, AUTO_ENABLE). For arrows, stop, simulate/log mock camera classification, resume. Button 0 toggles full process/conveyor.
-# Update on February 03, 2026: Added joystick buttons 6 (L pad) for TEST_SERVO_L, 7 (R pad) for TEST_SERVO_R to test servo responsiveness.
-# Update on February 03, 2026: Added 2s cooldown for servo test buttons (6/7) to prevent spamming and protect hardware.
-# Update on February 03, 2026: Cleaned logs to only show "Process started", classification, moisture (after 5s), "sorted". No joystick logs. Changed moisture delay to 5s. For D-pad arrows (up/left/right), capture current frame, run YOLO, log real class/moisture (5s delay), send to Arduino for sorting/servo (works with/without motor).
-# Update on February 03, 2026: Muted "Process started" and "Process stopped" logs to prevent repetition.
-# Update on February 03, 2026: Adjusted moisture reading from 5s to 1s. Made buttons 3/4/1 run YOLO on press like arrows (same behavior, different zones). Removed stop/resume in manual/simulate since continuous motor (stopping won't do anything). Added debounce (1s) for arrow presses to avoid double reads. Added wait/retry in simulate_camera until object detected. Added total time (HH:MM:SS) in statistics, auto-calculated.
-# Update on February 03, 2026: Shifted manual control to flapper zone only (ignore cam/YOLO). Buttons/arrows now assign fixed class (left/L/3: RAW, right/R/1: OVERCOOKED, up/Y/4: STANDARD), generate random moisture in class range, log class then 1s-delayed moisture, update stats, send class to Arduino (no YOLO, no object wait).
-# Update on February 04, 2026: Remapped joystick buttons to use test commands for servo movement: 6 for TEST_SERVO_L (log as RAW), 7 for TEST_SERVO_R (log as OVERCOOKED), 4 for STANDARD classification, 0 for start/stop toggle. Added cooldown for servo tests. Logs class, moisture, sorted for servo buttons as well.
+- Removed AT_CAM trigger and related cam US logic (no cam sensor).
+- In camera_loop, when process_running, use YOLO track to detect new track IDs, classify highest conf, send to Arduino.
+- Kept track persist, added seen_tracks set (reset on cooldown if no detections).
+- Added DETECTION_COOLDOWN_S ~10s after send to avoid resending for same object.
+- Removed cam dist polling, heartbeat handling (unneeded for motor issue).
+- Adjusted perform_classification to single run per detection (fast send).
+- On start_process, send AUTO_ENABLE (default true, but ensure).
+- Motor starts on first enqueue (detection/send).
 """
 
 import tkinter as tk
@@ -106,12 +63,9 @@ SERIAL_PORT = "/dev/ttyUSB0"
 SERIAL_BAUD = 115200  # Matches Arduino
 YOLO_MODEL_PATH = "my_model/my_model.pt"
 TRACKER_PATH = "bytetrack.yaml"
-CLASSIFICATION_TIMEOUT_S = 4.0  # Increased for better sync
-MAX_FRAME_AGE_S = 0.7  # Increased slightly to account for system load
-PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
-CLASSIFICATION_RETRIES = 1  # Retry classification if frame is stale
-YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
-CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
+CLASSIFICATION_TIMEOUT_S = 4.0  # Not used now
+DETECTION_COOLDOWN_S = 10.0  # Time after send to avoid resend for same
+YOLO_FRAME_SKIP = 5  # For preview updates
 MOISTURE_PRINT_DELAY_MS = 1000  # Updated to 1s
 
 # ---------------------------------------------------
@@ -151,7 +105,6 @@ class ACSSGui:
         self.running = True
         self.camera_thread = None
         self.ping_thread = None
-        self.cam_poll_thread = None
         self.picam2 = None
         self.yolo = None
         self.frame_lock = threading.Lock()
@@ -192,6 +145,10 @@ class ACSSGui:
         self.last_button_press_time = 0
         self.button_debounce_ms = 1000  # 1s interval to avoid double reads
 
+        # For detection in camera_loop
+        self.seen_tracks = set()
+        self.last_detection_time = 0
+
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
             try:
@@ -230,8 +187,7 @@ class ACSSGui:
         self.root.bind('<r>', lambda e: self.send_cmd('RESET'))          # Reset system
         self.root.bind('<t>', lambda e: self.send_cmd('TEST_SERVO_L'))   # Test left servo
         self.root.bind('<y>', lambda e: self.send_cmd('TEST_SERVO_R'))   # Test right servo
-        self.root.bind('<g>', lambda e: self.send_cmd('GET_CAM_DIST'))   # Get camera distance
-        self.root.bind('<h>', lambda e: self.send_cmd('GET_DEFAULT'))    # Get default class
+        self.root.bind('<g>', lambda e: self.send_cmd('GET_DEFAULT'))    # Get default class
 
         # Joystick-style keys for manual classifications
         self.root.bind('<Left>', lambda e: self.simulate_flapper('RAW'))      # Left for RAW
@@ -590,95 +546,49 @@ class ACSSGui:
         except Exception as outer:
             self._log_message(f"Serial reader crashed: {outer}")
 
-    def perform_classification(self, id=None):
-        if id is None:
-            id = 0
-        start_time = time.time()
-        all_candidates = []
-        num_runs = 0
-        min_stabilization_time = 1.0  # Minimum time to stabilize (1s)
+    def detect_and_classify(self):
+        """Perform detection and classification on current frame, return class_str and moisture if detected."""
+        try:
+            with self.frame_lock:
+                if self.latest_frame is None:
+                    return None, None
+                frame = self.latest_frame.copy()
 
-        while time.time() - start_time < CLASSIFICATION_TIMEOUT_S and num_runs < 20:  # Increased max runs for stabilization
-            try:
-                with self.frame_lock:
-                    if self.latest_frame is None:
-                        time.sleep(0.05)
-                        continue
-                    frame = self.latest_frame.copy()
+            results = self.yolo.track(
+                source=frame,
+                persist=True,
+                tracker=TRACKER_PATH,
+                conf=0.5,
+                max_det=1,
+                iou=0.45,
+                verbose=False
+            )
 
-                results = self.yolo.track(
-                    source=frame,
-                    persist=True,
-                    tracker=TRACKER_PATH,
-                    conf=0.5,  # Lowered for fewer misses
-                    max_det=1,
-                    iou=0.45,  # Added to reduce overlapping boxes
-                    verbose=False
-                )
-                num_runs += 1
+            if results and results[0].boxes and len(results[0].boxes) > 0:
+                cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
+                conf_tensor = results[0].boxes.conf.cpu().numpy()
+                id_tensor = results[0].boxes.id.cpu().numpy() if results[0].boxes.id is not None else []
 
-                if results and results[0].boxes and len(results[0].boxes) > 0:
-                    cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
-                    conf_tensor = results[0].boxes.conf.cpu().numpy()
-                    for i in range(len(cls_tensor)):
-                        cls = cls_tensor[i]
-                        conf = conf_tensor[i]
-                        if conf > 0.3:
-                            if cls == 1:  # raw-copra
-                                moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
-                            elif cls == 2:  # standard-copra
-                                moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
-                            else:  # overcooked-copra
-                                moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
-                            moisture = round(moisture, 2)
-                            all_candidates.append((cls, conf, moisture))
+                # Find highest conf
+                max_conf_idx = np.argmax(conf_tensor)
+                cls = cls_tensor[max_conf_idx]
+                conf = conf_tensor[max_conf_idx]
+                track_id = int(id_tensor[max_conf_idx]) if len(id_tensor) > 0 else None
 
-                if len(all_candidates) >= 2:
-                    class_counts = Counter([c[0] for c in all_candidates])
-                    if class_counts:
-                        top_cls, top_count = class_counts.most_common(1)[0]
-                        if all(count <= top_count / 2 for cls, count in class_counts.items() if cls != top_cls):
-                            if time.time() - start_time >= min_stabilization_time:
-                                break  # Consensus reached after min time
-
-                time.sleep(0.05)  # Increased for stability
-            except Exception as e:
-                print(f"YOLO error: {e}")
-                time.sleep(0.05)
-
-        # Enforce min time if not reached
-        while time.time() - start_time < min_stabilization_time:
-            time.sleep(0.01)
-
-        if all_candidates:
-            class_counts = Counter([c[0] for c in all_candidates])
-            most_common_cls = class_counts.most_common(1)[0][0]
-            filtered = [c for c in all_candidates if c[0] == most_common_cls]
-            filtered.sort(key=lambda x: x[1], reverse=True)
-            cls, conf, moisture = filtered[0]
-
-            category = self.category_map.get(cls, 'overcooked-copra')
-            class_str = category.upper().replace('-COPRA', '')
-
-            self.last_sent_class = class_str
-            self.last_sent_id = str(id)
-
-            success = self.send_cmd(f"{class_str}")
-            if success:
-                self.copra_counter += 1
-                cat_name = category.split('-')[0].capitalize()
-                self._log_message(f"Class: {cat_name.upper()}")
-                self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
-                self.stats[category] += 1
-                self.stats['total'] += 1
-                self.moisture_sums[category] += moisture
-                self.root.after(0, self.update_stats)
-            else:
-                self._log_message("All send retries failed → Defaulting to OVERCOOKED")
-                self.send_cmd(f"OVERCOOKED")
-        else:
-            self._log_message("No detection after retries → Sending DEFAULT to Arduino")
-            self.send_cmd(f"DEFAULT")
+                if conf > 0.3:
+                    if cls == 1:  # raw-copra
+                        moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
+                    elif cls == 2:  # standard-copra
+                        moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
+                    else:  # overcooked-copra
+                        moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
+                    moisture = round(moisture, 2)
+                    category = self.category_map.get(cls, 'overcooked-copra')
+                    class_str = category.upper().replace('-COPRA', '')
+                    return class_str, moisture, track_id
+        except Exception as e:
+            print(f"YOLO error: {e}")
+        return None, None, None
 
     def start_process(self):
         try:
@@ -692,6 +602,8 @@ class ACSSGui:
             self.serial_error_logged = False
             self.frame_drop_logged = False
             self.last_ping_time = time.time()
+            self.seen_tracks = set()
+            self.last_detection_time = 0
         except Exception as e:
             pass
 
@@ -755,6 +667,7 @@ class ACSSGui:
                         self.frame_drop_logged = True
                 last_frame_time = current_time
 
+                # For preview bounding boxes
                 if self.yolo and self.frame_counter % YOLO_FRAME_SKIP == 0:
                     results = self.yolo.track(
                         source=frame,
@@ -766,6 +679,35 @@ class ACSSGui:
                         verbose=False
                     )
                     self.last_results = results
+
+                # Detection and classification if process running
+                if self.process_running and current_time - self.last_detection_time > DETECTION_COOLDOWN_S / 10:  # Check more often
+                    class_str, moisture, track_id = self.detect_and_classify()
+                    if class_str and track_id is not None and track_id not in self.seen_tracks:
+                        self.seen_tracks.add(track_id)
+                        self.last_detection_time = current_time
+
+                        self.last_sent_class = class_str
+
+                        success = self.send_cmd(f"{class_str}")
+                        if success:
+                            self.copra_counter += 1
+                            category = f"{class_str.lower()}-copra"
+                            cat_name = class_str
+                            self._log_message(f"Class: {cat_name}")
+                            self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
+                            self.stats[category] += 1
+                            self.stats['total'] += 1
+                            self.moisture_sums[category] += moisture
+                            self.root.after(0, self.update_stats)
+                        else:
+                            self._log_message("All send retries failed → Defaulting to OVERCOOKED")
+                            self.send_cmd(f"OVERCOOKED")
+
+                # Clear seen_tracks if no detections for cooldown (object left)
+                if not self.last_results or not self.last_results[0].boxes or len(self.last_results[0].boxes) == 0:
+                    if current_time - self.last_detection_time > DETECTION_COOLDOWN_S:
+                        self.seen_tracks.clear()
 
                 if self.last_results and self.last_results[0].boxes:
                     frame = self.last_results[0].plot()

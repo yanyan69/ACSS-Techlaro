@@ -61,14 +61,13 @@ Changes:
 # Update on February 03, 2026: Adjusted moisture reading from 5s to 1s. Made buttons 3/4/1 run YOLO on press like arrows (same behavior, different zones). Removed stop/resume in manual/simulate since continuous motor (stopping won't do anything). Added debounce (1s) for arrow presses to avoid double reads. Added wait/retry in simulate_camera until object detected. Added total time (HH:MM:SS) in statistics, auto-calculated.
 # Update on February 03, 2026: Shifted manual control to flapper zone only (ignore cam/YOLO). Buttons/arrows now assign fixed class (left/L/3: RAW, right/R/1: OVERCOOKED, up/Y/4: STANDARD), generate random moisture in class range, log class then 1s-delayed moisture, update stats, send class to Arduino (no YOLO, no object wait).
 # Update on February 04, 2026: Remapped joystick buttons to use test commands for servo movement: 6 for TEST_SERVO_L (log as RAW), 7 for TEST_SERVO_R (log as OVERCOOKED), 4 for STANDARD classification, 0 for start/stop toggle. Added cooldown for servo tests. Logs class, moisture, sorted for servo buttons as well.
-# Update on February 08, 2026: Removed manual joystick/keyboard controls for classifications. Added predetermined queue simulation for 50 copra classifications. Sends classes at fixed intervals, logs class/moisture, updates stats. Monitors sorted count via serial ACKs; auto-stops after last +1s clear. Ignores cam zone, simulates classifications. Keeps flap US for detection/sorting.
-# Debug Update February 08, 2026: Added extra logging in serial_reader_thread for all Arduino messages. Enabled verbose mode for easier debugging.
 """
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import sys, threading, time
 from collections import Counter
+import pygame  # Added for joystick support
 import random  # For mock classification
 
 # Optional imports (graceful degradation)
@@ -113,16 +112,7 @@ PING_INTERVAL_S = 5.0  # Send PING every 5 seconds
 CLASSIFICATION_RETRIES = 1  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
-MOISTURE_PRINT_DELAY_MS = 500  # Updated to 0.5s
-QUEUE_INTERVAL_S = 5.0  # Time between sending each simulated classification (change as needed)
-QUEUE_CLEAR_DELAY_MS = 1000  # 1s clear after last sort
-
-# Predetermined queue (change the sequence here as needed, exactly 50 items)
-PREDETERMINED_QUEUE = (
-    ['RAW'] * 10 +
-    ['STANDARD'] * 20 +
-    ['OVERCOOKED'] * 20
-)  # Example: 10 Raw, 20 Standard, 20 Overcooked
+MOISTURE_PRINT_DELAY_MS = 1000  # Updated to 1s
 
 # ---------------------------------------------------
 
@@ -191,10 +181,16 @@ class ACSSGui:
         self.last_sent_class = None  # For sync check
         self.last_sent_id = None
 
-        # Queue simulation
-        self.queue = PREDETERMINED_QUEUE
-        self.queue_index = 0
-        self.sorted_count = 0
+        # Manual control counter (for dummy IDs in manual sends)
+        self.manual_id_counter = 0
+
+        # Cooldown for servo tests (2s to prevent spam)
+        self.last_servo_test_time = {6: 0, 7: 0}
+        self.servo_cooldown_ms = 2000
+
+        # Debounce for button presses
+        self.last_button_press_time = 0
+        self.button_debounce_ms = 1000  # 1s interval to avoid double reads
 
         # Load YOLO
         if ULTRALYTICS_AVAILABLE:
@@ -227,7 +223,7 @@ class ACSSGui:
         self.min_max_btn.place(relx=0.95, rely=0.95, anchor='se')
         self.min_max_btn.place_forget()
 
-        # Keyboard bindings (only keep toggle and debug)
+        # Add keyboard bindings for manual control
         self.root.bind('<a>', lambda e: self._toggle_process())  # Toggle start/stop
         self.root.bind('<p>', lambda e: self.send_cmd('PING'))           # Ping Arduino
         self.root.bind('<e>', lambda e: self.send_cmd('EMERGENCY_STOP')) # Emergency stop
@@ -236,6 +232,118 @@ class ACSSGui:
         self.root.bind('<y>', lambda e: self.send_cmd('TEST_SERVO_R'))   # Test right servo
         self.root.bind('<g>', lambda e: self.send_cmd('GET_CAM_DIST'))   # Get camera distance
         self.root.bind('<h>', lambda e: self.send_cmd('GET_DEFAULT'))    # Get default class
+
+        # Joystick-style keys for manual classifications
+        self.root.bind('<Left>', lambda e: self.simulate_flapper('RAW'))      # Left for RAW
+        self.root.bind('<x>', lambda e: self.simulate_flapper('RAW'))         # X similar to left
+        self.root.bind('<Up>', lambda e: self.simulate_flapper('STANDARD'))   # Up for STANDARD
+        self.root.bind('<y>', lambda e: self.simulate_flapper('STANDARD'))    # Y similar to up
+        self.root.bind('<Right>', lambda e: self.simulate_flapper('OVERCOOKED')) # Right for OVERCOOKED
+        self.root.bind('<b>', lambda e: self.simulate_flapper('OVERCOOKED'))  # B similar to right
+
+        # Initialize pygame for joystick
+        pygame.init()
+        pygame.joystick.init()
+        if pygame.joystick.get_count() > 0:
+            self.joystick = pygame.joystick.Joystick(0)
+            self.joystick.init()
+            self.joystick_thread = threading.Thread(target=self.joystick_loop, daemon=True)
+            self.joystick_thread.start()
+        else:
+            pass  # No log
+
+    def joystick_loop(self):
+        while self.running:
+            for event in pygame.event.get():
+                if event.type == pygame.JOYBUTTONDOWN:
+                    now = time.time() * 1000  # ms
+                    if now - self.last_button_press_time < self.button_debounce_ms:
+                        continue  # Debounce
+                    self.last_button_press_time = now
+                    if event.button == 6:  # 6 for TEST_SERVO_L (log as RAW)
+                        if now - self.last_servo_test_time[6] >= self.servo_cooldown_ms:
+                            self.manual_servo('TEST_SERVO_L', 'RAW')
+                            self.last_servo_test_time[6] = now
+                    elif event.button == 7:  # 7 for TEST_SERVO_R (log as OVERCOOKED)
+                        if now - self.last_servo_test_time[7] >= self.servo_cooldown_ms:
+                            self.manual_servo('TEST_SERVO_R', 'OVERCOOKED')
+                            self.last_servo_test_time[7] = now
+                    elif event.button == 4:  # 4 for STANDARD
+                        self.simulate_flapper('STANDARD')
+                    elif event.button == 0:  # 0 for toggle start/stop
+                        self._toggle_process()
+                elif event.type == pygame.JOYHATMOTION:
+                    if event.hat == 0:  # D-pad
+                        hat_x, hat_y = event.value
+                        if hat_x == -1:  # Left (RAW)
+                            self.simulate_flapper('RAW')
+                        elif hat_x == 1:  # Right (OVERCOOKED)
+                            self.simulate_flapper('OVERCOOKED')
+                        elif hat_y == 1:  # Up (STANDARD)
+                            self.simulate_flapper('STANDARD')
+            time.sleep(0.05)  # Poll rate
+
+    def manual_servo(self, servo_cmd, class_str):
+        """Send servo test command, log class/moisture/sorted, update stats."""
+        category = f"{class_str.lower()}-copra"
+
+        # Random moisture in class range
+        if class_str == 'RAW':
+            moisture = round(random.uniform(7.1, 60.0), 2)
+        elif class_str == 'STANDARD':
+            moisture = round(random.uniform(6.0, 7.0), 2)
+        elif class_str == 'OVERCOOKED':
+            moisture = round(random.uniform(4.0, 5.9), 2)
+        else:
+            return  # Invalid
+
+        success = self.send_cmd(servo_cmd)
+        if success:
+            self._log_message(f"Class: {class_str}")
+            self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
+            self._log_message("Classification sorted")
+            self.copra_counter += 1
+            self.stats[category] += 1
+            self.stats['total'] += 1
+            self.moisture_sums[category] += moisture
+            self.root.after(0, self.update_stats)
+        else:
+            self._log_message("Send failed")
+
+    def simulate_flapper(self, fixed_class):
+        """At flapper: Assign fixed class per button, random moisture in class range, log class/delayed moisture, update stats, send class to Arduino."""
+        now = time.time() * 1000
+        if now - self.last_button_press_time < self.button_debounce_ms:
+            return  # Debounce
+        self.last_button_press_time = now
+
+        class_str = fixed_class.upper()
+        category = f"{class_str.lower()}-copra"
+
+        # Random moisture in class range
+        if class_str == 'RAW':
+            moisture = round(random.uniform(7.1, 60.0), 2)
+        elif class_str == 'STANDARD':
+            moisture = round(random.uniform(6.0, 7.0), 2)
+        elif class_str == 'OVERCOOKED':
+            moisture = round(random.uniform(4.0, 5.9), 2)
+        else:
+            return  # Invalid
+
+        self._log_message(f"Class: {class_str}")
+        self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
+
+        success = self.send_cmd(class_str)
+        if success:
+            self._log_message("Classification sorted")
+            self.copra_counter += 1
+            self.stats[category] += 1
+            self.stats['total'] += 1
+            self.moisture_sums[category] += moisture
+            self.root.after(0, self.update_stats)
+        else:
+            self._log_message("Send failed → Defaulting to OVERCOOKED")
+            self.send_cmd("OVERCOOKED")
 
     def _on_tab_changed(self, event):
         notebook = event.widget
@@ -468,16 +576,10 @@ class ACSSGui:
                                 self._log_message(f"Class: {cls}")
                             elif line.startswith("ACK,SORT,L"):
                                 self._log_message("Classification sorted")
-                                self.sorted_count += 1
-                                self.check_queue_complete()
                             elif line.startswith("ACK,SORT,R"):
                                 self._log_message("Classification sorted")
-                                self.sorted_count += 1
-                                self.check_queue_complete()
                             elif line == "ACK,CLEAR_STANDARD":
                                 self._log_message("Classification sorted")
-                                self.sorted_count += 1
-                                self.check_queue_complete()
 
                         time.sleep(0.01)
                 except Exception as e:
@@ -488,40 +590,95 @@ class ACSSGui:
         except Exception as outer:
             self._log_message(f"Serial reader crashed: {outer}")
 
-    def check_queue_complete(self):
-        if self.sorted_count >= len(self.queue):
-            self.root.after(QUEUE_CLEAR_DELAY_MS, self.stop_process)
+    def perform_classification(self, id=None):
+        if id is None:
+            id = 0
+        start_time = time.time()
+        all_candidates = []
+        num_runs = 0
+        min_stabilization_time = 1.0  # Minimum time to stabilize (1s)
 
-    def send_next_class(self):
-        if self.queue_index < len(self.queue):
-            class_str = self.queue[self.queue_index].upper()
-            category = f"{class_str.lower()}-copra"
+        while time.time() - start_time < CLASSIFICATION_TIMEOUT_S and num_runs < 20:  # Increased max runs for stabilization
+            try:
+                with self.frame_lock:
+                    if self.latest_frame is None:
+                        time.sleep(0.05)
+                        continue
+                    frame = self.latest_frame.copy()
 
-            # Random moisture in class range
-            if class_str == 'RAW':
-                moisture = round(random.uniform(7.1, 60.0), 2)
-            elif class_str == 'STANDARD':
-                moisture = round(random.uniform(6.0, 7.0), 2)
-            elif class_str == 'OVERCOOKED':
-                moisture = round(random.uniform(4.0, 5.9), 2)
-            else:
-                return  # Invalid
+                results = self.yolo.track(
+                    source=frame,
+                    persist=True,
+                    tracker=TRACKER_PATH,
+                    conf=0.5,  # Lowered for fewer misses
+                    max_det=1,
+                    iou=0.45,  # Added to reduce overlapping boxes
+                    verbose=False
+                )
+                num_runs += 1
 
-            self._log_message(f"Class: {class_str}")
-            self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
+                if results and results[0].boxes and len(results[0].boxes) > 0:
+                    cls_tensor = results[0].boxes.cls.cpu().numpy().astype(int)
+                    conf_tensor = results[0].boxes.conf.cpu().numpy()
+                    for i in range(len(cls_tensor)):
+                        cls = cls_tensor[i]
+                        conf = conf_tensor[i]
+                        if conf > 0.3:
+                            if cls == 1:  # raw-copra
+                                moisture = 7.1 + (conf - 0.3) * (60.0 - 7.1) / 0.7
+                            elif cls == 2:  # standard-copra
+                                moisture = 6.0 + (conf - 0.3) * (7.0 - 6.0) / 0.7
+                            else:  # overcooked-copra
+                                moisture = 4.0 + (conf - 0.3) * (5.9 - 4.0) / 0.7
+                            moisture = round(moisture, 2)
+                            all_candidates.append((cls, conf, moisture))
 
-            success = self.send_cmd(class_str)
+                if len(all_candidates) >= 2:
+                    class_counts = Counter([c[0] for c in all_candidates])
+                    if class_counts:
+                        top_cls, top_count = class_counts.most_common(1)[0]
+                        if all(count <= top_count / 2 for cls, count in class_counts.items() if cls != top_cls):
+                            if time.time() - start_time >= min_stabilization_time:
+                                break  # Consensus reached after min time
+
+                time.sleep(0.05)  # Increased for stability
+            except Exception as e:
+                print(f"YOLO error: {e}")
+                time.sleep(0.05)
+
+        # Enforce min time if not reached
+        while time.time() - start_time < min_stabilization_time:
+            time.sleep(0.01)
+
+        if all_candidates:
+            class_counts = Counter([c[0] for c in all_candidates])
+            most_common_cls = class_counts.most_common(1)[0][0]
+            filtered = [c for c in all_candidates if c[0] == most_common_cls]
+            filtered.sort(key=lambda x: x[1], reverse=True)
+            cls, conf, moisture = filtered[0]
+
+            category = self.category_map.get(cls, 'overcooked-copra')
+            class_str = category.upper().replace('-COPRA', '')
+
+            self.last_sent_class = class_str
+            self.last_sent_id = str(id)
+
+            success = self.send_cmd(f"{class_str}")
             if success:
+                self.copra_counter += 1
+                cat_name = category.split('-')[0].capitalize()
+                self._log_message(f"Class: {cat_name.upper()}")
+                self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
                 self.stats[category] += 1
                 self.stats['total'] += 1
                 self.moisture_sums[category] += moisture
                 self.root.after(0, self.update_stats)
             else:
-                self._log_message("Send failed → Defaulting to OVERCOOKED")
-                self.send_cmd("OVERCOOKED")
-
-            self.queue_index += 1
-            self.root.after(int(QUEUE_INTERVAL_S * 1000), self.send_next_class)
+                self._log_message("All send retries failed → Defaulting to OVERCOOKED")
+                self.send_cmd(f"OVERCOOKED")
+        else:
+            self._log_message("No detection after retries → Sending DEFAULT to Arduino")
+            self.send_cmd(f"DEFAULT")
 
     def start_process(self):
         try:
@@ -535,9 +692,6 @@ class ACSSGui:
             self.serial_error_logged = False
             self.frame_drop_logged = False
             self.last_ping_time = time.time()
-            self.queue_index = 0
-            self.sorted_count = 0
-            self.root.after(0, self.send_next_class)  # Start sending queue
         except Exception as e:
             pass
 

@@ -116,8 +116,8 @@ CLASSIFICATION_RETRIES = 1  # Retry classification if frame is stale
 YOLO_FRAME_SKIP = 10  # Adjust here: Lower for more frequent bounding box updates (e.g., 1 for every frame, may cause lag); higher for less frequent (e.g., 10 for ~3 FPS if camera ~30 FPS). Set to 1 for constant detection without skip.
 CAM_DIST_POLL_INTERVAL_S = 10.0  # Poll cam dist every 10s
 MOISTURE_PRINT_DELAY_MS = 500  # Updated to 0.5s
-QUEUE_INTERVAL_S = 5.0  # Time between sending each simulated classification (change as needed)
 QUEUE_CLEAR_DELAY_MS = 1000  # 1s clear after last sort
+OBJECT_DEBOUNCE_S = 1.0  # Debounce time to avoid multiple sends for same object
 
 # ---------------------------------------------------
 
@@ -185,6 +185,7 @@ class ACSSGui:
         self.arduino_default = 'OVERCOOKED'  # Query on start
         self.last_sent_class = None  # For sync check
         self.last_sent_id = None
+        self.last_detection_time = 0  # For debounce
 
         # Queue simulation with tweakable list
         self.copra_queue = deque()
@@ -749,16 +750,19 @@ class ACSSGui:
             self._log_message(f"Serial reader crashed: {outer}")
 
     def perform_classification(self, id=None):
-        if id is None:
-            id = 0
+        # This is kept for compatibility, but since Arduino doesn't send "ACK,AT_CAM", it's not triggered. Detection is now in camera_loop.
+        pass
+
+    def send_from_queue(self, id):
         if self.copra_queue:
             item_id, class_str, moisture = self.copra_queue.popleft()
 
             category = class_str.lower() + '-copra'
-            self._log_message(f"Class: {class_str}")
+            display_id = str(item_id) if item_id is not None else str(id)
+            self._log_message(f"Class: {class_str} (ID: {display_id})")
             self.root.after(MOISTURE_PRINT_DELAY_MS, lambda m=moisture: self._log_message(f"Moisture: {m:.2f}%"))
 
-            success = self.send_cmd(f"{class_str},{id if item_id is None else item_id}")  # Use provided ID or from queue
+            success = self.send_cmd(f"{class_str},{id}")
             if success:
                 self.stats[category] += 1
                 self.stats['total'] += 1
@@ -788,7 +792,7 @@ class ACSSGui:
             self.frame_drop_logged = False
             self.last_ping_time = time.time()
             self.sorted_count = 0
-            # Queue sending is triggered by camera detections via perform_classification
+            # Detection and sending now handled in camera_loop
         except Exception as e:
             self._log_message(f"Start process error: {e}")
 
@@ -844,6 +848,7 @@ class ACSSGui:
         fps_time = time.time()
         last_frame_time = time.time()
         last_fps_log = time.time()
+        object_id_counter = 0  # Simple incremental ID for sends
         while self.camera_running:
             try:
                 frame = self.picam2.capture_array()
@@ -867,6 +872,13 @@ class ACSSGui:
                         verbose=False
                     )
                     self.last_results = results
+
+                    # Detect object and send from queue if debounced
+                    if self.process_running and self.last_results and self.last_results[0].boxes and current_time - self.last_detection_time >= OBJECT_DEBOUNCE_S:
+                        self._log_message("Object detected in camera preview → Sending from queue")
+                        self.send_from_queue(object_id_counter)
+                        object_id_counter += 1
+                        self.last_detection_time = current_time
 
                 if self.last_results and self.last_results[0].boxes:
                     frame = self.last_results[0].plot()

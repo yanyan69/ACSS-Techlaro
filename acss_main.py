@@ -2,9 +2,8 @@
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
-import sys, threading, time
+import threading, time
 from collections import Counter, deque  # Added deque for queue
-import random  # For mock moisture if needed
 
 # Optional imports (graceful degradation)
 try:

@@ -1,0 +1,59 @@
+/*
+  Automated Copra Segregation - Arduino Controller (Simplified FIFO Automation)
+  - Fully automated sequence: start ultrasonic → camera (stop for classification) → flapper (stop for sorting).
+  - Stops at camera for CLASS_WAIT_MS to wait for CLASS_TIMEOUT handling, then resumes with default if needed.
+  - FIFO queue tracks multiple copra items; classifications from RPi assigned to earliest item at camera.
+  - Falls back to OVERCOOKED if no classification at flapper.
+  - AS7263 (NIR sensor) functionality disabled.
+  - Debug distance messages configurable via defines.
+  - Added PING command to confirm serial connection with RPi.
+  - Fixed conveyor movement: short clear after servo for RAW/OVERCOOKED; adjustable for STANDARD.
+  - Updated ultrasonic detection: treats 999 cm (timeout) as valid object detection for all sensors, with error counting.
+  - Added camera sensor condition: detects if distance increases by > 27 cm from previous reading.
+  - Added 500ms non-blocking delay before stopping conveyor after flapper detection to center copra.
+  - Added per-item timeouts and dynamic motor adjustments.
+  - Switched to non-blocking serial reading.
+  - Standardized ACK/DBG prints.
+  - Re-added queue printing for debug.
+  - Added median ultrasonic readings.
+  - Capped motor extensions.
+  - Cleaned up unused code.
+
+  Updates based on identified gaps:
+  - Added Watchdog Timer (WDT) for hang detection and auto-reset.
+  - Improved syncing: Added sequence IDs for classifications (RPi must echo idx in responses), checksum for serial messages, heartbeat pings.
+  - Added fixed-size serial buffer to prevent overflows.
+  - Enhanced error recovery: System pause on critical errors, LED alerts for states/errors.
+  - Updated LED ring for visual feedback (green: idle, blue: moving, red: error).
+  - Removed dead code (e.g., sendASReadings).
+  - Added basic self-test on startup.
+  - Improved efficiency: Throttled sensor checks when not needed.
+  - Added emergency stop via serial "EMERGENCY_STOP".
+
+  // Update on November 05, 2025: Addressed garbled serial output issue (likely due to baud rate mismatch—ensure serial monitor/RPi is set to 115200 baud). Explained heartbeat functionality in comments. No code changes needed for garbled output as it's typically a configuration issue; added Serial.flush() after key prints for potential stability. Started tracking updates with dates.
+  // Update on November 05, 2025: Increased WDT timeout to 8s, added servo test commands and debugs for reset diagnosis, stricter US2 jump checks. No sequence changes.
+  // Update on November 05, 2025: Optimized for RAM: Replaced String with enum for classifications, used F() macro for prints, reduced SERIAL_BUFFER_SIZE to 32, MAX_QUEUE to 5.
+  // Update on November 05, 2025: Set LED ring to consistently white, removed all color change calls except initial white setup.
+  // Update on November 05, 2025: Updated US2 detection trigger to <20cm or >30cm (as per user request), keeping timeout and jump logic.
+  // Update on November 05, 2025: Removed SHORT_CLEAR_MS after L/R servo (no forward move after sorting OVERCOOKED/RAW). Confirmed queue handling: Conveyor only moves forward if queue >0 after sort/clear; for STANDARD, clears forward, then checks queue. US2/US3 detections during STANDARD clear are skipped (state=AT_FLAPPER), but dynamic extensions from US1 handle queueing. If needed, can adjust state to allow detections during clear.
+  // Update on November 05, 2025: Added low/high threshold conditions for US3 (flapper) similar to US2, with configurable constants FLAP_DETECT_LOW_CM and FLAP_DETECT_HIGH_CM. Removed FLAP_DETECT_DISTANCE_CM as it's replaced by the new thresholds.
+  // Update on November 06, 2025: Addressed detection gaps and stop issues. Changed ultrasonic thresholds to floats. Enabled start ultrasonic checks during AT_FLAPPER to detect new items during STANDARD clear. Added handling for missed cam/flap detections: assign default classification, dequeue on miss, extend motor if more in queue, resume from IDLE if queue pending. This prevents process stops on missed objects. Confirmed STANDARD clear moves forward for 4 seconds without immediate stop; occasional stops likely due to prior misses, now mitigated.
+  // Update on November 07, 2025: Addressed gaps in classifications and cam US. Enforced checksums strictly in handleCommand (reject invalid). Added ID-echo in ACK,CLASS_RECEIVED. Reduced CAM_DETECT_COOLDOWN_MS to 500ms for close items. Set CAM_JUMP_CHECKS to 2 for sensitivity. Added GET_CAM_DIST command for raw distance query. Send ERR,CAM_SENSOR_FAIL on persistent cam fails. Improved default handling consistency.
+  // Update on November 07, 2025: Fixed false start detections from timeouts. Removed dist==999 from start detected (treat as error/no object). Added sensor reset on persistent fails (echo pin toggle). Added 2s startup delay for stabilization.
+  // Update on November 07, 2025: Resolved log spam in ERROR_STATE by skipping updates in loop(). Added cooldown (1s) for "ERR,MISSED_CAM" logs. Added "RESUME" command to exit ERROR_STATE without full reset.
+  // Update on November 07, 2025: Increased MAX_QUEUE to 10. On full queue, dequeue oldest if it's default (CLASS_OVERCOOKED) to continue processing without pause.
+  // Update on November 07, 2025: Made default failsafe classification configurable via SET_DEFAULT command (e.g., SET_DEFAULT,RAW).
+  // Update on November 07, 2025: Ensured conveyor moves for STANDARD even on last queue item by starting clear before checking queue empty.
+  // Update on November 07, 2025: Added CLEARING_STANDARD state to prevent duplicate clears and ensure conveyor moves for single STANDARD items without stalling.
+  // Update on November 07, 2025: Fixed resume timeout spam by bypassing MOVE_PAUSE_MS on queue resume; increased MOVE_PAUSE_MS to 200ms; made missed cam recoverable (no global error increment).
+  // Update on November 07, 2025: Made STANDARD clear immediate after dequeue in AT_FLAPPER without extra checks; resume queue in CLEARING_STANDARD if pending after clear.
+  // Update on November 07, 2025: Increased CLASS_WAIT_MS to 5000ms to give RPi more time. Added GET_DEFAULT command to return current defaultClass. Handled 'DEFAULT' class from RPi to use configured default without timeout.
+  // Update on November 08, 2025: Tuned cam detection (CAM_DETECT_HIGH_CM=25.0, CAM_JUMP_CHECKS=3). Implemented custom strupr. Added id= to ACK,MOTOR,START and ACK,SORT,L/R. Added currentDequeuedId for ID tracking.
+  // Update on November 08, 2025: Removed motor from selfTest to avoid ghost startup. Increased CAM_DETECT_COOLDOWN_MS to 2000ms. Added justResumedFromCam flag (skip cam check 500ms after resume). Added queue empty check in AT_FLAPPER to skip ghost sort. Set currentDequeuedId in ITEM_TIMEOUT_DEQUEUE; set state=IDLE if queue empty after.
+  // Update on November 08, 2025: Added reset for justResumedFromCam after skip period.
+  // Update on November 08, 2025: Removed dist==999.0 as detected in cam ultrasonic (treat as no detection, like start US).
+  // Update on November 08, 2025: Fixed incorrect ID in ACK,MOTOR,START by setting currentDequeuedId to next head before startMotorMove calls in AT_FLAPPER (post-servo), IDLE resume, CLEARING_STANDARD resume, and AT_CAM resume. Reset currentDequeuedId = -1 in stopMotor. Added id= to default ACK,CLASS prints in AT_FLAPPER.
+  // Update on November 08, 2025: Tuned for close items: Lowered CAM_DETECT_COOLDOWN_MS to 800ms. Added guard to ignore cam if no !atCamNotified. Resume AT_CAM immediately if classified. Extend justResumedFromCam to post-flap. Prioritize AT_CAM over timeout; on timeout in AT_CAM, assign/resume. Dynamic timeout + queue buffer. Increment errors on misses/timeouts. Add millis timestamps to logs. Add state to ACKs. Reverse retry on cam miss.
+  // Update on November 08, 2025: Fixed premature timeout for queued items by basing timeout on camArrivedAt if set, else detectedAt. This prevents early timeouts from queue delays in close-spaced detections.
+  // Update on November 08, 2025: Added guard in checkFlapUltrasonicTrigger to ignore detection if head item not classified (CLASS_NONE) to prevent early triggers before cam class succeeds/failsafes.
+*/

@@ -1,6 +1,6 @@
 ﻿# Ignore all datasets and images
-tf210-env/
-venv/
+.tf210-env/
+.venv/
 2025-codes/
 backup-0203/
 resources/

@@ -1,5 +1,5 @@
 ﻿# Ignore all datasets and images
-.tf210-env/
+tf210-env/
 .venv/
 2025-codes/
 backup-0203/
